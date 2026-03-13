@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aem-kb-system"
+version = "0.1.0"
+description = "AEM Knowledge Base Ingestion System"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "asyncpg>=0.29",
+    "boto3>=1.34",
+    "strands-agents>=0.1",
+    "pydantic-settings>=2.2",
+    "markdownify>=0.12",
+    "python-frontmatter>=1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hypothesis>=6.100",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "moto[s3]>=5.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
