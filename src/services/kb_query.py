@@ -113,3 +113,50 @@ class KBQueryService:
             yield chunk
 
         yield _sse("done", {"query": query})
+
+    async def _stream_bedrock(self, query: str, context: str) -> AsyncIterator[str]:
+        """Call Bedrock converse_stream and yield SSE token events."""
+        system_prompt = (
+            "You are a helpful assistant for a knowledge base. "
+            "Answer the user's question using ONLY the provided context. "
+            "If the context doesn't contain enough information, say so. "
+            "Cite the source URLs when referencing specific information."
+        )
+        user_message = (
+            f"Context from knowledge base:\n\n{context}\n\n---\n\n"
+            f"User question: {query}"
+        )
+
+        bedrock = boto3.client(
+            "bedrock-runtime", region_name=self._settings.aws_region
+        )
+
+        try:
+            response = await asyncio.to_thread(
+                bedrock.converse_stream,
+                modelId=self._settings.bedrock_model_id,
+                system=[{"text": system_prompt}],
+                messages=[{"role": "user", "content": [{"text": user_message}]}],
+                inferenceConfig={
+                    "maxTokens": self._settings.bedrock_max_tokens,
+                    "temperature": 0.3,
+                },
+            )
+
+            stream = response.get("stream")
+            if stream is None:
+                yield _sse("error", {"message": "No stream returned from Bedrock"})
+                return
+
+            for event in stream:
+                if "contentBlockDelta" in event:
+                    delta = event["contentBlockDelta"].get("delta", {})
+                    text = delta.get("text", "")
+                    if text:
+                        yield _sse("token", {"text": text})
+                elif "messageStop" in event:
+                    break
+
+        except Exception as exc:
+            logger.exception("Bedrock streaming error")
+            yield _sse("error", {"message": str(exc)})

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import asyncpg
+import frontmatter as fm_lib
 
 from src.agents.extractor import ExtractorAgent, PostProcessor
 from src.agents.validator import ValidatorAgent
@@ -336,27 +337,32 @@ class PipelineService:
             all_results = extraction.files  # already MarkdownFile objects
             child_urls = extraction.child_urls
 
-            # Re-process through PostProcessor if namespace/parent_url need injection
-            # The extractor already calls PostProcessor.process() internally,
-            # but without namespace and parent_url. We need to re-process.
-            # Actually, looking at the extractor code, it calls:
-            #   files = PostProcessor.process(all_results, url, region, brand)
-            # We need it to pass namespace and parent_url. Since we can't
-            # change the extractor call here, we'll re-run PostProcessor
-            # with the extraction results.
-            # But extraction.files are already MarkdownFile objects, not
-            # ExtractionResult objects. The raw results are lost.
-            #
-            # The cleanest approach: the extractor returns files processed
-            # without namespace/parent_url, so we update the fields directly.
+            # The extractor calls PostProcessor.process() without namespace
+            # or parent_url, so those fields are empty in the returned
+            # MarkdownFiles (including the baked YAML frontmatter in
+            # md_content).  Patch the fields AND regenerate frontmatter.
             md_files: list[MarkdownFile] = []
             for f in all_results:
-                # Update namespace, parent_context, brand, region on each file
-                updated = f.model_copy(update={
+                parent_context = parent_url or ""
+                # Rebuild YAML frontmatter with correct metadata
+                fm_metadata = {
+                    "key": f.key,
                     "namespace": namespace,
-                    "parent_context": parent_url or "",
                     "brand": brand,
                     "region": region,
+                    "source_url": f.source_url,
+                    "parent_context": parent_context,
+                    "title": f.title,
+                }
+                post = fm_lib.Post(f.md_body, **fm_metadata)
+                md_content = fm_lib.dumps(post)
+
+                updated = f.model_copy(update={
+                    "namespace": namespace,
+                    "parent_context": parent_context,
+                    "brand": brand,
+                    "region": region,
+                    "md_content": md_content,
                 })
                 md_files.append(updated)
 

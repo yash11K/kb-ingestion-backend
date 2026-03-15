@@ -15,6 +15,7 @@ from src.db.connection import close_pool, create_pool
 from src.services.pipeline import PipelineService
 from src.services.revalidation import RevalidationService
 from src.services.s3_upload import S3UploadService
+from src.services.kb_query import KBQueryService
 from src.services.stream_manager import StreamManager
 
 
@@ -34,12 +35,14 @@ async def lifespan(app: FastAPI):
         extractor, validator, pool, s3_service, settings, stream_manager
     )
     revalidation_service = RevalidationService(validator, pool, s3_service, settings)
+    kb_query_service = KBQueryService(pool, settings)
 
     app.state.db_pool = pool
     app.state.s3_service = s3_service
     app.state.stream_manager = stream_manager
     app.state.pipeline_service = pipeline_service
     app.state.revalidation_service = revalidation_service
+    app.state.kb_query_service = kb_query_service
     app.state.settings = settings
 
     yield
