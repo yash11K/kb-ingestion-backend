@@ -197,7 +197,7 @@ class QueueItemDetail(BaseModel):
     content_type: str
     component_type: str
     source_url: str
-    aem_node_id: str
+    aem_node_id: str | None = None
     md_content: str
     region: str
     brand: str
@@ -228,9 +228,9 @@ class FileDetail(BaseModel):
     content_hash: str
     source_url: str
     component_type: str
-    aem_node_id: str
+    aem_node_id: str | None = None
     md_content: str
-    modify_date: datetime
+    modify_date: datetime | None = None
     parent_context: str
     region: str
     brand: str
