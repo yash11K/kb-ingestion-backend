@@ -32,7 +32,7 @@ CREATE TABLE kb_files (
     content_hash         TEXT NOT NULL,
     source_url           TEXT NOT NULL,
     component_type       TEXT NOT NULL,
-    aem_node_id          TEXT NOT NULL,
+    aem_node_id          TEXT,
     md_content           TEXT NOT NULL,
     doc_type             TEXT,
     modify_date          TIMESTAMPTZ,
