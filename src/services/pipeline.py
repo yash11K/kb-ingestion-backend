@@ -3,14 +3,16 @@
 Coordinates the full ingestion pipeline: fetch → extract → insert to DB →
 validate → route → upload approved → complete job.
 
-Supports opt-in BFS crawl loop for recursive child URL processing.
+Processes a flat list of URLs (no BFS crawling). Deep links are discovered
+and stored for user confirmation, not auto-followed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections import deque
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from uuid import UUID
 
 import asyncpg
@@ -21,19 +23,19 @@ from src.agents.validator import ValidatorAgent
 from src.config import Settings
 from src.db.queries import (
     find_by_content_hash,
+    insert_deep_links,
     insert_kb_file,
-    update_crawl_progress,
     update_ingestion_job,
     update_kb_file_status,
 )
 from src.models.schemas import ExtractionOutput, FileStatus, MarkdownFile
+from src.services.deep_link_extractor import extract_deep_links
 from src.services.s3_upload import S3UploadService
 from src.services.stream_manager import StreamManager
 from src.utils.url_inference import (
     infer_brand,
     infer_namespace,
     infer_region,
-    normalize_for_matching,
     normalize_url,
 )
 
@@ -58,96 +60,60 @@ class PipelineService:
         self.s3_service = s3_service
         self.settings = settings
         self.stream_manager = stream_manager
+        self._concurrency_sem = asyncio.Semaphore(settings.max_concurrent_jobs)
 
     async def run(
         self,
         job_id: UUID,
-        url: str,
-        max_depth: int = 0,
-        confirmed_urls: list[str] | None = None,
+        urls: list[str],
         source_id: UUID | None = None,
     ) -> None:
-        """Execute the full ingestion pipeline for a job.
+        """Execute the ingestion pipeline for a list of URLs.
 
-        Infers brand, region, and namespace from the URL, clamps max_depth
-        to the system-configured maximum, persists the effective depth in
-        the job record, and delegates to the BFS crawl loop.
+        Processes each URL sequentially: fetch → extract → validate → route → upload.
+        Discovers deep links in content and stores them for user confirmation.
         """
+        # Register stream immediately so SSE clients can connect
         self.stream_manager.register(job_id)
-        self.stream_manager.publish(job_id, "progress", {
-            "stage": "started",
-            "message": f"Pipeline started for {url}",
+        self.stream_manager.publish(job_id, "queued", {
+            "stage": "queued",
+            "message": f"Job queued — waiting for available slot ({len(urls)} URL(s))",
         })
+
         try:
-            # Infer brand, region, namespace from URL
-            brand = infer_brand(url)
-            region = infer_region(url, self.settings.locale_region_map)
-            namespace = infer_namespace(url, self.settings.namespace_list)
-
-            # Clamp max_depth to system-configured maximum
-            effective_depth = min(max_depth, self.settings.max_crawl_depth)
-
-            # Persist effective max_depth in job record
-            await update_ingestion_job(
-                self.db_pool, job_id, max_depth=effective_depth
-            )
-
-            logger.info(
-                "job_id=%s: brand=%s, region=%s, namespace=%s, "
-                "requested_depth=%d, effective_depth=%d",
-                job_id, brand, region, namespace, max_depth, effective_depth,
-            )
-
-            await self._run_pipeline(
-                job_id, url, brand, region, namespace,
-                effective_depth, confirmed_urls, source_id,
-            )
-        except Exception as exc:
-            logger.error(
-                "Pipeline failed for job_id=%s: %s", job_id, exc, exc_info=True
-            )
-            await update_ingestion_job(
-                self.db_pool,
-                job_id,
-                status="failed",
-                error_message=str(exc),
-                completed_at=datetime.now(timezone.utc),
-            )
-            self.stream_manager.publish(job_id, "error", {
-                "message": str(exc),
-            })
+            # Acquire semaphore — blocks if max_concurrent_jobs reached
+            async with self._concurrency_sem:
+                self.stream_manager.publish(job_id, "progress", {
+                    "stage": "started",
+                    "message": f"Pipeline started for {len(urls)} URL(s)",
+                })
+                try:
+                    await self._run_pipeline(job_id, urls, source_id)
+                except Exception as exc:
+                    logger.error(
+                        "Pipeline failed for job_id=%s: %s", job_id, exc, exc_info=True
+                    )
+                    await update_ingestion_job(
+                        self.db_pool,
+                        job_id,
+                        status="failed",
+                        error_message=str(exc),
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    self.stream_manager.publish(job_id, "error", {
+                        "message": str(exc),
+                    })
         finally:
             self.stream_manager.finish(job_id)
 
     async def _run_pipeline(
         self,
         job_id: UUID,
-        url: str,
-        brand: str,
-        region: str,
-        namespace: str,
-        effective_depth: int,
-        confirmed_urls: list[str] | None,
+        urls: list[str],
         source_id: UUID | None,
     ) -> None:
-        """BFS crawl loop wrapping _process_single_url.
-
-        Initializes a BFS queue with the seed URL at depth 0, processes
-        each URL via _process_single_url, and enqueues discovered child
-        URLs at current_depth + 1 — subject to depth limits, cycle
-        detection, and optional confirmed_urls filtering.
-        """
+        """Process each URL in the flat list sequentially."""
         sm = self.stream_manager
-
-        # Normalize confirmed_urls for matching (if provided)
-        confirmed_set: set[str] | None = None
-        if confirmed_urls:
-            confirmed_set = {normalize_for_matching(u) for u in confirmed_urls}
-
-        # BFS state — each entry is (url, depth, parent_url)
-        bfs_queue: deque[tuple[str, int, str | None]] = deque()
-        bfs_queue.append((url, 0, None))
-        visited: set[str] = set()
 
         # Job-level counters
         total_files_created = 0
@@ -155,48 +121,29 @@ class PipelineService:
         total_files_pending_review = 0
         total_files_auto_rejected = 0
         total_duplicates_skipped = 0
-        pages_crawled = 0
-        max_depth_reached = 0
-        skipped_count = 0
+        pages_processed = 0
         failed_count = 0
-        page_index = 0
+        total_deep_links = 0
 
-        while bfs_queue:
-            current_url, depth, parent_url = bfs_queue.popleft()
-            normalized = normalize_url(current_url)
-
-            # Cycle detection
-            if normalized in visited:
-                skipped_count += 1
-                sm.publish(job_id, "crawl_page_skipped", {
-                    "url": current_url,
-                    "reason": "already_visited",
-                })
-                logger.debug(
-                    "Skipping already-visited URL: %s (job_id=%s)",
-                    current_url, job_id,
-                )
-                continue
-
-            visited.add(normalized)
-            page_index += 1
-
-            # Emit crawl_page_start
+        for page_index, url in enumerate(urls, 1):
             sm.publish(job_id, "crawl_page_start", {
-                "url": current_url,
-                "depth": depth,
+                "url": url,
+                "depth": 0,
                 "page_index": page_index,
             })
 
-            child_urls, counters = await self._process_single_url(
-                current_url, brand, region, namespace,
+            # Infer metadata from URL
+            brand = infer_brand(url)
+            region = infer_region(url, self.settings.locale_region_map)
+            namespace = infer_namespace(url, self.settings.namespace_list)
+
+            counters, deep_links_found = await self._process_single_url(
+                url, brand, region, namespace,
                 job_id, source_id,
-                parent_url=parent_url,
             )
 
             if counters.get("_failed"):
                 failed_count += 1
-                # crawl_page_error already emitted by _process_single_url
                 continue
 
             # Accumulate counters
@@ -205,66 +152,34 @@ class PipelineService:
             total_files_pending_review += counters.get("files_pending_review", 0)
             total_files_auto_rejected += counters.get("files_auto_rejected", 0)
             total_duplicates_skipped += counters.get("duplicates_skipped", 0)
-            pages_crawled += 1
-            max_depth_reached = max(max_depth_reached, depth)
+            total_deep_links += deep_links_found
+            pages_processed += 1
 
-            # Update crawl progress in DB
-            await update_crawl_progress(self.db_pool, job_id, pages_crawled, depth)
-
-            files_extracted = counters.get("files_created", 0)
-
-            # Emit crawl_page_complete
             sm.publish(job_id, "crawl_page_complete", {
-                "url": current_url,
-                "depth": depth,
-                "files_extracted": files_extracted,
-                "new_child_urls": len(child_urls),
+                "url": url,
+                "depth": 0,
+                "files_extracted": counters.get("files_created", 0),
+                "deep_links_found": deep_links_found,
             })
 
-            # For depth 0 with max_depth == 0, emit child_urls_discovered
-            # but don't follow them (backward compatibility)
-            if depth == 0 and effective_depth == 0 and child_urls:
-                await update_ingestion_job(
-                    self.db_pool, job_id, child_urls=child_urls
-                )
-                sm.publish(job_id, "child_urls_discovered", {
-                    "count": len(child_urls),
-                    "urls": child_urls,
-                    "message": (
-                        f"Discovered {len(child_urls)} child page(s). "
-                        "Submit each URL via POST /ingest to extract deeper content."
-                    ),
-                })
-                logger.info(
-                    "job_id=%s discovered %d child URLs: %s",
-                    job_id, len(child_urls), child_urls,
-                )
-
-            # Enqueue child URLs if within depth limit
-            if depth + 1 <= effective_depth and child_urls:
-                for child_url in child_urls:
-                    child_normalized = normalize_url(child_url)
-                    if child_normalized in visited:
-                        continue
-
-                    # Apply confirmed_urls filter
-                    if confirmed_set is not None:
-                        child_match = normalize_for_matching(child_url)
-                        if child_match not in confirmed_set:
-                            continue
-
-                    bfs_queue.append((child_url, depth + 1, current_url))
-
-        # Emit crawl_summary
+        # Emit summary
         sm.publish(job_id, "crawl_summary", {
-            "total_pages": pages_crawled,
+            "total_pages": pages_processed,
             "total_files": total_files_created,
-            "max_depth_reached": max_depth_reached,
-            "skipped_count": skipped_count,
             "failed_count": failed_count,
+            "deep_links_discovered": total_deep_links,
         })
 
-        # Update job with final counters and completed status
+        if total_deep_links > 0:
+            sm.publish(job_id, "deep_links_discovered", {
+                "count": total_deep_links,
+                "message": (
+                    f"Discovered {total_deep_links} embedded link(s) in content. "
+                    "Review them in the source detail page."
+                ),
+            })
+
+        # Update job with final counters
         await update_ingestion_job(
             self.db_pool,
             job_id,
@@ -274,15 +189,16 @@ class PipelineService:
             files_pending_review=total_files_pending_review,
             files_auto_rejected=total_files_auto_rejected,
             duplicates_skipped=total_duplicates_skipped,
+            pages_crawled=pages_processed,
             completed_at=datetime.now(timezone.utc),
         )
 
         logger.info(
             "Pipeline completed for job_id=%s: pages=%d, created=%d, approved=%d, "
-            "review=%d, rejected=%d, duplicates=%d, skipped=%d, failed=%d",
-            job_id, pages_crawled, total_files_created, total_files_auto_approved,
+            "review=%d, rejected=%d, duplicates=%d, failed=%d, deep_links=%d",
+            job_id, pages_processed, total_files_created, total_files_auto_approved,
             total_files_pending_review, total_files_auto_rejected,
-            total_duplicates_skipped, skipped_count, failed_count,
+            total_duplicates_skipped, failed_count, total_deep_links,
         )
 
         sm.publish(job_id, "complete", {
@@ -302,16 +218,11 @@ class PipelineService:
         namespace: str,
         job_id: UUID,
         source_id: UUID | None,
-        parent_url: str | None = None,
-    ) -> tuple[list[str], dict]:
+    ) -> tuple[dict, int]:
         """Extract → validate → route → upload for one URL.
 
-        Returns (child_urls, counters_dict) where counters_dict has keys:
-        files_created, files_auto_approved, files_pending_review,
-        files_auto_rejected, duplicates_skipped.
-
-        On error: logs, emits crawl_page_error SSE event, returns
-        ([], {"_failed": True}).
+        Returns (counters_dict, deep_links_count).
+        On error: returns ({"_failed": True}, 0).
         """
         sm = self.stream_manager
         counters = {
@@ -333,25 +244,19 @@ class PipelineService:
                 url, region, brand, job_id, sm
             )
 
-            # PostProcessor now accepts namespace and parent_url
-            all_results = extraction.files  # already MarkdownFile objects
+            all_results = extraction.files
             child_urls = extraction.child_urls
 
-            # The extractor calls PostProcessor.process() without namespace
-            # or parent_url, so those fields are empty in the returned
-            # MarkdownFiles (including the baked YAML frontmatter in
-            # md_content).  Patch the fields AND regenerate frontmatter.
+            # Patch namespace and rebuild frontmatter
             md_files: list[MarkdownFile] = []
             for f in all_results:
-                parent_context = parent_url or ""
-                # Rebuild YAML frontmatter with correct metadata
                 fm_metadata = {
                     "key": f.key,
                     "namespace": namespace,
                     "brand": brand,
                     "region": region,
                     "source_url": f.source_url,
-                    "parent_context": parent_context,
+                    "parent_context": "",
                     "title": f.title,
                 }
                 post = fm_lib.Post(f.md_body, **fm_metadata)
@@ -359,7 +264,7 @@ class PipelineService:
 
                 updated = f.model_copy(update={
                     "namespace": namespace,
-                    "parent_context": parent_context,
+                    "parent_context": "",
                     "brand": brand,
                     "region": region,
                     "md_content": md_content,
@@ -376,11 +281,71 @@ class PipelineService:
                 "message": f"Extraction complete: {total_nodes} markdown files produced",
                 "total_nodes": total_nodes,
             })
-            await update_ingestion_job(
-                self.db_pool, job_id, total_nodes_found=total_nodes
-            )
 
-            # 2. Process each file
+            # 2. Discover deep links in content
+            deep_links_count = 0
+            try:
+                parsed_url = urlparse(url)
+                base_host = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+                # Get content nodes from the extraction for deep link scanning
+                # We use the extraction's child_urls discovery as a baseline
+                # but also scan HTML content for embedded links
+                from src.models.schemas import ContentNode
+                # Re-extract content nodes for deep link scanning
+                # (the extractor already has them, but we need the raw nodes)
+                import httpx
+                import json
+                try:
+                    resp = httpx.get(url, timeout=self.settings.aem_request_timeout)
+                    if resp.status_code == 200:
+                        aem_json = resp.json()
+                        if self.settings.enable_haiku_prefilter:
+                            from src.services.haiku_prefilter import HaikuPrefilter
+                            prefilter = HaikuPrefilter(self.settings)
+                            content_nodes = prefilter.identify_content_paths(aem_json)
+                        else:
+                            from src.tools.filter_components import filter_by_component_type_direct
+                            content_nodes = filter_by_component_type_direct(
+                                aem_json,
+                                self.settings.allowlist,
+                                self.settings.denylist,
+                            )
+
+                        deep_links = extract_deep_links(
+                            content_nodes,
+                            source_page_url=url,
+                            base_host=base_host,
+                            url_denylist_patterns=self.settings.url_denylist_patterns,
+                        )
+
+                        if deep_links and source_id:
+                            link_dicts = [
+                                {
+                                    "source_id": source_id,
+                                    "job_id": job_id,
+                                    "url": dl.url,
+                                    "model_json_url": dl.model_json_url,
+                                    "anchor_text": dl.anchor_text,
+                                    "found_in_node": dl.found_in_node,
+                                    "found_in_page": dl.found_in_page,
+                                }
+                                for dl in deep_links
+                            ]
+                            await insert_deep_links(self.db_pool, link_dicts)
+                            deep_links_count = len(deep_links)
+                            logger.info(
+                                "Stored %d deep links from %s for user confirmation",
+                                deep_links_count, url,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "Deep link extraction failed for %s: %s", url, exc,
+                    )
+            except Exception as exc:
+                logger.warning("Deep link discovery failed: %s", exc)
+
+            # 3. Process each file
             for idx, md_file in enumerate(md_files, 1):
                 sm.publish(job_id, "progress", {
                     "stage": "processing",
@@ -389,12 +354,10 @@ class PipelineService:
                     "total": total_nodes,
                 })
 
-                # 2b. Insert to DB with status pending_review
                 file_id = await self._insert_file(md_file, source_id, job_id)
                 counters["files_created"] += 1
 
                 try:
-                    # 2c. Validate
                     sm.publish(job_id, "progress", {
                         "stage": "validation",
                         "message": f"Validating file {idx}/{total_nodes}: {md_file.filename}",
@@ -405,10 +368,8 @@ class PipelineService:
                         md_file, job_id, sm
                     )
 
-                    # 2d. Route based on score
                     status = self._route_by_score(validation.score)
 
-                    # 2e. Store validation results and update status
                     await update_kb_file_status(
                         self.db_pool,
                         file_id,
@@ -434,7 +395,6 @@ class PipelineService:
                         "score": validation.score,
                     })
 
-                    # 2f. Upload approved files to S3
                     if status == FileStatus.APPROVED:
                         sm.publish(job_id, "progress", {
                             "stage": "s3_upload",
@@ -454,7 +414,7 @@ class PipelineService:
                     counters["files_pending_review"] += 1
                     continue
 
-            return child_urls, counters
+            return counters, deep_links_count
 
         except Exception as exc:
             logger.error(
@@ -465,7 +425,7 @@ class PipelineService:
                 "url": url,
                 "error": str(exc),
             })
-            return [], {"_failed": True}
+            return {"_failed": True}, 0
 
     async def _insert_file(self, md_file: MarkdownFile,
                            source_id: UUID | None = None,
@@ -505,11 +465,7 @@ class PipelineService:
     async def _upload_to_s3(
         self, file_id: UUID, md_file: MarkdownFile,
     ) -> None:
-        """Upload an approved file to S3 and update its DB status to in_s3.
-
-        On S3 failure, the file retains its approved status and the error
-        is logged for later retry.
-        """
+        """Upload an approved file to S3 and update its DB status to in_s3."""
         try:
             result = await self.s3_service.upload(md_file, file_id)
             await update_kb_file_status(

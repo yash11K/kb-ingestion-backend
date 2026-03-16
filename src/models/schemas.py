@@ -117,9 +117,9 @@ class FrontmatterResult(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    url: HttpUrl
-    max_depth: int = Field(default=0, ge=0)
-    confirmed_urls: list[str] | None = None
+    urls: list[HttpUrl] = Field(..., min_length=1)
+    nav_root_url: str | None = None       # the home page this nav tree came from
+    nav_metadata: dict | None = None      # {url -> {label, section}} for source enrichment
 
 
 
@@ -152,6 +152,17 @@ class RevalidateRequest(BaseModel):
 class IngestResponse(BaseModel):
     source_id: UUID
     job_id: UUID
+    status: JobStatus
+
+
+class BatchIngestItem(BaseModel):
+    source_id: UUID
+    job_id: UUID
+    url: str
+
+
+class BatchIngestResponse(BaseModel):
+    jobs: list[BatchIngestItem]
     status: JobStatus
 
 
@@ -274,6 +285,8 @@ class SourceSummary(BaseModel):
     url: str
     region: str
     brand: str
+    nav_label: str | None = None
+    nav_section: str | None = None
     last_ingested_at: datetime | None
     created_at: datetime
 
@@ -316,6 +329,66 @@ class NavPreviewResponse(BaseModel):
     total_urls: int
     urls_by_depth: dict[int, list[NavPreviewItem]]
     summary: dict[int, int]              # depth level → count of URLs at that depth
+
+
+# --- Navigation Tree Models ---
+
+
+class NavTreeNode(BaseModel):
+    label: str
+    url: str | None = None               # None for category headers
+    model_json_url: str | None = None
+    is_external: bool = False
+    children: list["NavTreeNode"] = Field(default_factory=list)
+
+
+class NavTreeSection(BaseModel):
+    section_name: str                     # "Hamburger Menu", "Footer Links", etc.
+    nodes: list[NavTreeNode]
+
+
+class NavTree(BaseModel):
+    brand: str
+    region: str
+    base_url: str
+    sections: list[NavTreeSection]
+
+
+# --- Deep Link Models ---
+
+
+class DeepLinkStatus(str, Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    DISMISSED = "dismissed"
+    INGESTED = "ingested"
+
+
+class DeepLink(BaseModel):
+    url: str
+    model_json_url: str
+    anchor_text: str = ""
+    found_in_node: str = ""
+    found_in_page: str = ""
+
+
+class DeepLinkResponse(BaseModel):
+    id: UUID
+    url: str
+    model_json_url: str
+    anchor_text: str | None
+    found_in_node: str | None
+    found_in_page: str
+    status: DeepLinkStatus
+    created_at: datetime
+
+
+class DeepLinkConfirmRequest(BaseModel):
+    link_ids: list[UUID] = Field(..., min_length=1)
+
+
+class DeepLinkDismissRequest(BaseModel):
+    link_ids: list[UUID] = Field(..., min_length=1)
 
 
 class StatsResponse(BaseModel):

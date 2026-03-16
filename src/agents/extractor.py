@@ -21,8 +21,9 @@ from strands.models.bedrock import BedrockModel
 from src.config import Settings
 from src.models.schemas import ContentNode, ExtractionOutput, ExtractionResult, MarkdownFile
 from src.tools.fetch_aem import ToolError
-from src.tools.filter_components import extract_child_urls, filter_by_component_type_direct
+from src.tools.filter_components import filter_by_component_type_direct
 from src.tools.md_generator import _slugify, compute_content_hash
+from src.services.haiku_prefilter import HaikuPrefilter
 
 if TYPE_CHECKING:
     from src.services.stream_manager import StreamManager
@@ -271,20 +272,16 @@ class ExtractorAgent:
                 self.settings.max_payload_bytes,
             )
 
-        # --- Step 2: Pre-filter content nodes directly in Python ---
-        content_nodes = filter_by_component_type_direct(
-            aem_json,
-            self.settings.allowlist,
-            self.settings.denylist,
-        )
-
-        # Discover internal child page URLs from link fields (e.g. ctaLink)
-        child_urls = extract_child_urls(content_nodes, url)
-        if child_urls:
-            logger.info(
-                "Discovered %d child page URLs from content nodes at %s",
-                len(child_urls),
-                url,
+        # --- Step 2: Pre-filter content nodes ---
+        if self.settings.enable_haiku_prefilter:
+            logger.info("Using Haiku pre-filter for content classification")
+            prefilter = HaikuPrefilter(self.settings)
+            content_nodes = prefilter.identify_content_paths(aem_json)
+        else:
+            content_nodes = filter_by_component_type_direct(
+                aem_json,
+                self.settings.allowlist,
+                self.settings.denylist,
             )
 
         # Log filtered results
@@ -403,7 +400,7 @@ class ExtractorAgent:
 
         logger.info("Extraction complete, %d results from %d nodes", len(all_results), len(content_nodes))
         files = PostProcessor.process(all_results, url, region, brand)
-        return ExtractionOutput(files=files, child_urls=child_urls)
+        return ExtractionOutput(files=files, child_urls=[])
 
 
 

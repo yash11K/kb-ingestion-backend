@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from src.db.queries import (
+    get_active_jobs,
     get_source,
     get_source_stats,
     insert_ingestion_job,
@@ -57,6 +58,8 @@ async def list_all_sources(
             url=r["url"],
             region=r["region"],
             brand=r["brand"],
+            nav_label=r.get("nav_label"),
+            nav_section=r.get("nav_section"),
             last_ingested_at=r.get("last_ingested_at"),
             created_at=r["created_at"],
         )
@@ -67,6 +70,13 @@ async def list_all_sources(
     return PaginatedResponse[SourceSummary](
         items=items, total=total, page=page, size=size, pages=pages
     )
+
+
+@router.get("/sources/active-jobs")
+async def get_active_source_jobs(request: Request) -> dict[str, str]:
+    """Return {source_id: job_id} for all sources with in-progress jobs."""
+    pool = request.app.state.db_pool
+    return await get_active_jobs(pool)
 
 
 @router.get("/sources/{source_id}")
@@ -135,9 +145,7 @@ async def reingest_source(
     background_tasks.add_task(
         pipeline_service.run,
         job_id,
-        source["url"],
-        0,     # max_depth: default single-page re-ingest
-        None,  # confirmed_urls
+        [source["url"]],  # flat URL list
         source_id,
     )
 

@@ -1,6 +1,7 @@
-"""SQL query functions for kb_files and ingestion_jobs tables."""
+"""SQL query functions for kb_files, ingestion_jobs, nav_tree_cache, and deep_links tables."""
 
 import json
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import asyncpg
@@ -353,6 +354,20 @@ async def list_ingestion_jobs(
     )
     return [_row_to_dict(r) for r in rows], total
 
+
+async def get_active_jobs(pool: asyncpg.Pool) -> dict[str, str]:
+    """Return {source_id: job_id} for all in-progress ingestion jobs."""
+    rows = await pool.fetch(
+        """
+        SELECT source_id, id AS job_id
+        FROM ingestion_jobs
+        WHERE status = 'in_progress' AND source_id IS NOT NULL
+        ORDER BY started_at DESC
+        """
+    )
+    return {str(r["source_id"]): str(r["job_id"]) for r in rows}
+
+
 # ---------------------------------------------------------------------------
 # revalidation_jobs queries
 # ---------------------------------------------------------------------------
@@ -465,7 +480,197 @@ def _row_to_dict(row: asyncpg.Record) -> dict:
     """Convert an asyncpg Record to a plain dict, deserialising JSONB cols."""
     d = dict(row)
     # asyncpg returns JSONB columns as strings; parse them back
-    for col in ("validation_breakdown", "validation_issues"):
+    for col in ("validation_breakdown", "validation_issues", "tree_data"):
         if col in d and isinstance(d[col], str):
             d[col] = json.loads(d[col])
     return d
+
+
+# ---------------------------------------------------------------------------
+# nav_tree_cache queries
+# ---------------------------------------------------------------------------
+
+
+async def upsert_nav_tree_cache(
+    pool: asyncpg.Pool,
+    root_url: str,
+    brand: str,
+    region: str,
+    tree_data: dict,
+    ttl_hours: int = 24,
+) -> None:
+    """Insert or update a cached navigation tree."""
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+    await pool.execute(
+        """
+        INSERT INTO nav_tree_cache (root_url, brand, region, tree_data, fetched_at, expires_at)
+        VALUES ($1, $2, $3, $4, NOW(), $5)
+        ON CONFLICT (root_url) DO UPDATE
+          SET brand = $2, region = $3, tree_data = $4, fetched_at = NOW(), expires_at = $5
+        """,
+        root_url,
+        brand,
+        region,
+        json.dumps(tree_data),
+        expires_at,
+    )
+
+
+async def get_nav_tree_cache(pool: asyncpg.Pool, root_url: str) -> dict | None:
+    """Return cached nav tree data if present and not expired, else None."""
+    row = await pool.fetchrow(
+        "SELECT tree_data FROM nav_tree_cache WHERE root_url = $1 AND expires_at > NOW()",
+        root_url,
+    )
+    if row is None:
+        return None
+    data = row["tree_data"]
+    if isinstance(data, str):
+        return json.loads(data)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# deep_links queries
+# ---------------------------------------------------------------------------
+
+
+async def insert_deep_links(pool: asyncpg.Pool, links: list[dict]) -> None:
+    """Batch insert discovered deep links."""
+    if not links:
+        return
+    await pool.executemany(
+        """
+        INSERT INTO deep_links (source_id, job_id, url, model_json_url, anchor_text,
+                                found_in_node, found_in_page, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+        """,
+        [
+            (
+                link.get("source_id"),
+                link.get("job_id"),
+                link["url"],
+                link["model_json_url"],
+                link.get("anchor_text", ""),
+                link.get("found_in_node", ""),
+                link["found_in_page"],
+            )
+            for link in links
+        ],
+    )
+
+
+async def list_deep_links(
+    pool: asyncpg.Pool,
+    source_id: UUID,
+    status: str = "pending",
+) -> list[dict]:
+    """Return deep links for a source filtered by status."""
+    rows = await pool.fetch(
+        """
+        SELECT id, url, model_json_url, anchor_text, found_in_node,
+               found_in_page, status, created_at
+        FROM deep_links
+        WHERE source_id = $1 AND status = $2
+        ORDER BY created_at DESC
+        """,
+        source_id,
+        status,
+    )
+    return [dict(r) for r in rows]
+
+
+async def bulk_update_deep_link_status(
+    pool: asyncpg.Pool,
+    link_ids: list[UUID],
+    status: str,
+) -> None:
+    """Update status for multiple deep links."""
+    await pool.execute(
+        "UPDATE deep_links SET status = $1 WHERE id = ANY($2::uuid[])",
+        status,
+        link_ids,
+    )
+
+
+async def insert_deep_link_ingestion_jobs(
+    pool: asyncpg.Pool,
+    source_id: UUID,
+    link_ids: list[UUID],
+) -> tuple[UUID, list[str]]:
+    """Create an ingestion job for confirmed deep links.
+
+    Returns (job_id, list_of_model_json_urls).
+    """
+    # Get the model.json URLs for confirmed links
+    rows = await pool.fetch(
+        "SELECT model_json_url FROM deep_links WHERE id = ANY($1::uuid[])",
+        link_ids,
+    )
+    urls = [r["model_json_url"] for r in rows]
+
+    if not urls:
+        raise ValueError("No valid deep link URLs found for the given IDs")
+
+    # Create job
+    job_row = await pool.fetchrow(
+        """
+        INSERT INTO ingestion_jobs (source_url, source_id, status, started_at)
+        VALUES ($1, $2, 'in_progress', NOW())
+        RETURNING id
+        """,
+        urls[0],
+        source_id,
+    )
+    job_id = job_row["id"]
+
+    # Mark links as ingested
+    await bulk_update_deep_link_status(pool, link_ids, "ingested")
+
+    return job_id, urls
+
+
+# ---------------------------------------------------------------------------
+# Enhanced source queries
+# ---------------------------------------------------------------------------
+
+
+async def find_or_create_source_enriched(
+    pool: asyncpg.Pool,
+    url: str,
+    region: str,
+    brand: str,
+    nav_root_url: str | None = None,
+    nav_label: str | None = None,
+    nav_section: str | None = None,
+    page_path: str | None = None,
+) -> tuple[UUID, bool]:
+    """Find or create a source with optional nav context enrichment."""
+    row = await pool.fetchrow("SELECT id FROM sources WHERE url = $1", url)
+    if row is not None:
+        # Update nav context if provided
+        if nav_label or nav_section:
+            await pool.execute(
+                """
+                UPDATE sources
+                SET nav_root_url = COALESCE($2, nav_root_url),
+                    nav_label = COALESCE($3, nav_label),
+                    nav_section = COALESCE($4, nav_section),
+                    page_path = COALESCE($5, page_path),
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                row["id"], nav_root_url, nav_label, nav_section, page_path,
+            )
+        return row["id"], False
+
+    row = await pool.fetchrow(
+        """
+        INSERT INTO sources (url, region, brand, nav_root_url, nav_label, nav_section, page_path)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (url) DO UPDATE SET updated_at = NOW()
+        RETURNING id
+        """,
+        url, region, brand, nav_root_url, nav_label, nav_section, page_path,
+    )
+    return row["id"], True

@@ -103,41 +103,6 @@ def _extract_html_content(node: dict) -> str:
     return "\n".join(parts) if parts else ""
 
 
-# Fields in a node's flat dict that carry internal AEM page paths.
-# These are used to discover child pages for deeper ingestion.
-_LINK_FIELDS = frozenset({"ctaLink", "url", "linkUrl", "href", "path"})
-
-
-def extract_child_urls(nodes: list[ContentNode], base_url: str) -> list[str]:
-    """Scan content-node metadata for internal link fields and return full model.json URLs.
-
-    For each node, checks ``_LINK_FIELDS`` in ``node.metadata``.  Paths that
-    start with ``/`` are treated as AEM-internal and expanded to a full
-    ``<scheme>://<host><path>.model.json`` URL.
-
-    Args:
-        nodes: Filtered ContentNode list from ``filter_by_component_type_direct``.
-        base_url: The original AEM model.json URL, used to derive scheme + host.
-
-    Returns:
-        Deduplicated list of child model.json URLs to ingest.
-    """
-    from urllib.parse import urlparse
-
-    parsed = urlparse(base_url)
-    host = f"{parsed.scheme}://{parsed.netloc}"
-
-    discovered: set[str] = set()
-    for node in nodes:
-        for field in _LINK_FIELDS:
-            value = node.metadata.get(field)
-            if isinstance(value, str) and value.startswith("/"):
-                child_url = f"{host}{value}.model.json"
-                discovered.add(child_url)
-
-    return sorted(discovered)
-
-
 def _traverse(
     node: dict,
     parent_path: str,

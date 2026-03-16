@@ -12,18 +12,23 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from src.db.queries import (
     find_or_create_source,
+    find_or_create_source_enriched,
     get_ingestion_job,
     insert_ingestion_job,
     list_ingestion_jobs,
     update_source_last_ingested,
 )
 from src.models.schemas import (
+    BatchIngestItem,
+    BatchIngestResponse,
     IngestionJobResponse,
     IngestRequest,
     IngestResponse,
     JobStatus,
     PaginatedResponse,
 )
+from src.utils.url_inference import infer_brand, infer_region
+from src.config import get_settings
 
 router = APIRouter()
 
@@ -33,38 +38,43 @@ async def start_ingestion(
     body: IngestRequest,
     background_tasks: BackgroundTasks,
     request: Request,
-) -> IngestResponse:
-    """Validate an ingest request, find-or-create the source, create a job,
-    and launch the pipeline."""
+) -> BatchIngestResponse:
+    """Accept a list of model.json URLs and launch one ingestion job per URL."""
     db_pool = request.app.state.db_pool
     pipeline_service = request.app.state.pipeline_service
+    settings = get_settings()
 
-    # Brand and region will be inferred from URL inside pipeline.run();
-    # use placeholders for source lookup only.
-    region = "unknown"
-    brand = "unknown"
+    url_strings = [str(u) for u in body.urls]
+    nav_meta = body.nav_metadata or {}
 
-    # Find or create the source
-    source_id, _created = await find_or_create_source(
-        db_pool, str(body.url), region, brand
-    )
+    # Create one job per URL, each with its own source
+    jobs: list[BatchIngestItem] = []
+    for url in url_strings:
+        brand = infer_brand(url)
+        region = infer_region(url, settings.locale_region_map)
+        meta = nav_meta.get(url, {})
 
-    # Create the ingestion job linked to the source
-    job_id = await insert_ingestion_job(db_pool, str(body.url), source_id)
+        source_id, _created = await find_or_create_source_enriched(
+            db_pool, url, region, brand,
+            nav_root_url=body.nav_root_url,
+            nav_label=meta.get("label"),
+            nav_section=meta.get("section"),
+            page_path=meta.get("page_path"),
+        )
+        await update_source_last_ingested(db_pool, source_id)
 
-    # Touch last_ingested_at
-    await update_source_last_ingested(db_pool, source_id)
+        job_id = await insert_ingestion_job(db_pool, url, source_id)
 
-    # Launch the pipeline as a background task
-    background_tasks.add_task(
-        pipeline_service.run, job_id, str(body.url),
-        body.max_depth, body.confirmed_urls,
-        source_id,
-    )
+        # Launch each job as a separate background task
+        background_tasks.add_task(
+            pipeline_service.run, job_id, [url], source_id,
+        )
 
-    return IngestResponse(
-        source_id=source_id, job_id=job_id, status=JobStatus.IN_PROGRESS
-    )
+        jobs.append(BatchIngestItem(
+            source_id=source_id, job_id=job_id, url=url,
+        ))
+
+    return BatchIngestResponse(jobs=jobs, status=JobStatus.IN_PROGRESS)
 
 
 @router.get("/jobs")

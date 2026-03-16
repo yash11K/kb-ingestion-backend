@@ -54,8 +54,27 @@ class Settings(BaseSettings):
     # Batch threshold for splitting large node sets into sequential agent calls
     batch_threshold: int = 8
 
-    # Deep crawl configuration
-    max_crawl_depth: int = 3  # MAX_CRAWL_DEPTH env var
+    # Concurrency
+    max_concurrent_jobs: int = 3  # MAX_CONCURRENT_JOBS env var
+
+    # Haiku pre-filter
+    haiku_model_id: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+    enable_haiku_prefilter: bool = True
+
+    # URL denylist patterns for deep link filtering
+    url_denylist_patterns: list[str] = [
+        "/reservation",
+        "/login",
+        "/account",
+        "/search",
+        "/booking",
+        "/checkout",
+        "/payment",
+        "/registration",
+        "/reset-password",
+        "/demo",
+    ]
+
     namespace_list: list[str] = [  # NAMESPACE_LIST env var
         "locations",
         "products-and-services",
