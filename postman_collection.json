@@ -5,55 +5,46 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    {
-      "key": "base_url",
-      "value": "http://localhost:8000/api/v1"
-    },
-    {
-      "key": "job_id",
-      "value": ""
-    },
-    {
-      "key": "file_id",
-      "value": ""
-    }
+    { "key": "base_url", "value": "http://localhost:8000/api/v1" },
+    { "key": "job_id", "value": "" },
+    { "key": "file_id", "value": "" },
+    { "key": "source_id", "value": "" }
   ],
   "item": [
     {
       "name": "Ingestion",
       "item": [
         {
-          "name": "Start Ingestion",
+          "name": "Start Batch Ingestion",
           "request": {
             "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"url\": \"https://your-aem-instance/content/page.model.json\",\n  \"region\": \"US\",\n  \"brand\": \"YourBrand\"\n}"
+              "raw": "{\n  \"urls\": [\n    \"https://your-aem-instance/content/page.model.json\"\n  ],\n  \"nav_root_url\": \"https://your-aem-instance/content/home.model.json\",\n  \"nav_metadata\": {\n    \"https://your-aem-instance/content/page.model.json\": {\n      \"label\": \"Page Title\",\n      \"section\": \"Main Nav\",\n      \"page_path\": \"/content/page\"\n    }\n  }\n}"
             },
             "url": {
               "raw": "{{base_url}}/ingest",
               "host": ["{{base_url}}"],
               "path": ["ingest"]
             },
-            "description": "Start a new ingestion job. Returns 202 with job_id. The pipeline runs in the background."
+            "description": "Start batch ingestion. One job per URL. Region/brand auto-inferred. Returns 202."
           },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 202) {",
-                  "    var jsonData = pm.response.json();",
-                  "    pm.collectionVariables.set('job_id', jsonData.job_id);",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "if (pm.response.code === 202) {",
+                "    var jsonData = pm.response.json();",
+                "    if (jsonData.jobs && jsonData.jobs.length > 0) {",
+                "        pm.collectionVariables.set('job_id', jsonData.jobs[0].job_id);",
+                "        pm.collectionVariables.set('source_id', jsonData.jobs[0].source_id);",
+                "    }",
+                "}"
+              ],
+              "type": "text/javascript"
             }
-          ]
+          }]
         },
         {
           "name": "Get Job Status",
@@ -64,8 +55,123 @@
               "host": ["{{base_url}}"],
               "path": ["ingest", "{{job_id}}"]
             },
-            "description": "Get the status and counters for an ingestion job."
+            "description": "Get status and counters for an ingestion job."
           }
+        },
+        {
+          "name": "List All Jobs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs?page=1&size=20",
+              "host": ["{{base_url}}"],
+              "path": ["jobs"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "size", "value": "20" }
+              ]
+            },
+            "description": "Paginated list of all ingestion jobs."
+          }
+        },
+        {
+          "name": "Stream Job Events (SSE)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/ingest/{{job_id}}/stream",
+              "host": ["{{base_url}}"],
+              "path": ["ingest", "{{job_id}}", "stream"]
+            },
+            "description": "SSE connection for real-time pipeline events. Keepalive every 30s."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sources",
+      "item": [
+        {
+          "name": "List All Sources",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sources?page=1&size=20",
+              "host": ["{{base_url}}"],
+              "path": ["sources"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "size", "value": "20" },
+                { "key": "region", "value": "", "disabled": true },
+                { "key": "brand", "value": "", "disabled": true }
+              ]
+            },
+            "description": "Paginated list of all ingestion sources. Enable params to filter."
+          }
+        },
+        {
+          "name": "Get Active Jobs by Source",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sources/active-jobs",
+              "host": ["{{base_url}}"],
+              "path": ["sources", "active-jobs"]
+            },
+            "description": "Returns {source_id: job_id} for sources with in-progress jobs."
+          }
+        },
+        {
+          "name": "Get Source Detail",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sources/{{source_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["sources", "{{source_id}}"]
+            },
+            "description": "Source detail with aggregate job and file stats."
+          }
+        },
+        {
+          "name": "List Source Jobs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sources/{{source_id}}/jobs?page=1&size=20",
+              "host": ["{{base_url}}"],
+              "path": ["sources", "{{source_id}}", "jobs"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "size", "value": "20" }
+              ]
+            },
+            "description": "Paginated ingestion jobs for a specific source."
+          }
+        },
+        {
+          "name": "Re-ingest Source",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/sources/{{source_id}}/ingest",
+              "host": ["{{base_url}}"],
+              "path": ["sources", "{{source_id}}", "ingest"]
+            },
+            "description": "Trigger new ingestion for an existing source. Region/brand inherited."
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "if (pm.response.code === 202) {",
+                "    var jsonData = pm.response.json();",
+                "    pm.collectionVariables.set('job_id', jsonData.job_id);",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }]
         }
       ]
     },
@@ -101,16 +207,14 @@
               "host": ["{{base_url}}"],
               "path": ["queue", "{{file_id}}"]
             },
-            "description": "Get full details for a file in the review queue. Returns 404 if not pending_review."
+            "description": "Full details for a file in the review queue. 404 if not pending_review."
           }
         },
         {
           "name": "Accept File",
           "request": {
             "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"reviewed_by\": \"reviewer@example.com\"\n}"
@@ -127,9 +231,7 @@
           "name": "Reject File",
           "request": {
             "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"reviewed_by\": \"reviewer@example.com\",\n  \"review_notes\": \"Content is too short and lacks context\"\n}"
@@ -146,9 +248,7 @@
           "name": "Update File Content",
           "request": {
             "method": "PUT",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" }
-            ],
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"md_content\": \"---\\ntitle: Updated Title\\ncontent_type: faq\\n---\\n# Updated content here\\n\\nThis is the revised body.\"\n}"
@@ -158,7 +258,7 @@
               "host": ["{{base_url}}"],
               "path": ["queue", "{{file_id}}", "update"]
             },
-            "description": "Update markdown content. Recomputes content hash. Preserves current status."
+            "description": "Update markdown content. Recomputes content hash. Preserves status."
           }
         }
       ]
@@ -184,7 +284,7 @@
                 { "key": "component_type", "value": "", "disabled": true }
               ]
             },
-            "description": "List all tracked files with optional filters. Enable query params to filter by status, region, brand, etc."
+            "description": "List all tracked files with optional filters."
           }
         },
         {
@@ -196,7 +296,206 @@
               "host": ["{{base_url}}"],
               "path": ["files", "{{file_id}}"]
             },
-            "description": "Get full details for any tracked file."
+            "description": "Full details for any tracked file."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Revalidation",
+      "item": [
+        {
+          "name": "Revalidate Single File",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/files/{{file_id}}/revalidate",
+              "host": ["{{base_url}}"],
+              "path": ["files", "{{file_id}}", "revalidate"]
+            },
+            "description": "Synchronous single-file revalidation. Re-runs the Validator Agent."
+          }
+        },
+        {
+          "name": "Start Batch Revalidation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_ids\": [\"uuid-1\", \"uuid-2\", \"uuid-3\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/revalidate",
+              "host": ["{{base_url}}"],
+              "path": ["revalidate"]
+            },
+            "description": "Start batch revalidation for multiple files."
+          }
+        },
+        {
+          "name": "Get Revalidation Job Status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/revalidate/{{job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["revalidate", "{{job_id}}"]
+            },
+            "description": "Status and counters for a batch revalidation job."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Statistics",
+      "item": [
+        {
+          "name": "Get Stats",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/stats",
+              "host": ["{{base_url}}"],
+              "path": ["stats"]
+            },
+            "description": "Aggregate file statistics: totals by status and average score."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Navigation & Deep Links",
+      "item": [
+        {
+          "name": "Get Nav Tree",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/nav/tree?url=https://your-aem-instance/content/home.model.json",
+              "host": ["{{base_url}}"],
+              "path": ["nav", "tree"],
+              "query": [
+                { "key": "url", "value": "https://your-aem-instance/content/home.model.json" },
+                { "key": "force_refresh", "value": "false", "disabled": true }
+              ]
+            },
+            "description": "Parse AEM model.json into a nav tree. Cached 24h. Use force_refresh to bypass."
+          }
+        },
+        {
+          "name": "List All Deep Links",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/deep-links?page=1&size=50",
+              "host": ["{{base_url}}"],
+              "path": ["deep-links"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "size", "value": "50" },
+                { "key": "status", "value": "", "disabled": true }
+              ]
+            },
+            "description": "All deep links across sources. Filter by status: pending, confirmed, dismissed, ingested."
+          }
+        },
+        {
+          "name": "List Deep Links for Source",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/deep-links/{{source_id}}?status=pending",
+              "host": ["{{base_url}}"],
+              "path": ["deep-links", "{{source_id}}"],
+              "query": [{ "key": "status", "value": "pending" }]
+            },
+            "description": "Deep links for a specific source, filtered by status."
+          }
+        },
+        {
+          "name": "Confirm Deep Links",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"link_ids\": [\"uuid-1\", \"uuid-2\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/deep-links/{{source_id}}/confirm",
+              "host": ["{{base_url}}"],
+              "path": ["deep-links", "{{source_id}}", "confirm"]
+            },
+            "description": "Confirm selected deep links and start ingestion."
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "if (pm.response.code === 200) {",
+                "    var jsonData = pm.response.json();",
+                "    pm.collectionVariables.set('job_id', jsonData.job_id);",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }]
+        },
+        {
+          "name": "Dismiss Deep Links",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"link_ids\": [\"uuid-1\", \"uuid-2\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/deep-links/{{source_id}}/dismiss",
+              "host": ["{{base_url}}"],
+              "path": ["deep-links", "{{source_id}}", "dismiss"]
+            },
+            "description": "Dismiss selected deep links."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Knowledge Base",
+      "item": [
+        {
+          "name": "KB Search (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"search terms here\",\n  \"limit\": 10\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/kb/search",
+              "host": ["{{base_url}}"],
+              "path": ["kb", "search"]
+            },
+            "description": "Full-text KB search. Results streamed as SSE."
+          }
+        },
+        {
+          "name": "KB Chat (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"your question here\",\n  \"context_limit\": 5\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/kb/chat",
+              "host": ["{{base_url}}"],
+              "path": ["kb", "chat"]
+            },
+            "description": "RAG endpoint — retrieves KB context then streams Bedrock response as SSE."
           }
         }
       ]
