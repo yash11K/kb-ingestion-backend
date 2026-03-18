@@ -101,8 +101,8 @@ def _make_test_settings() -> Settings:
         aws_region="us-east-1",
         s3_bucket_name="test-bucket",
         bedrock_model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
-        allowlist=["*/text", "*/richtext", "*/accordionitem"],
         denylist=["*/responsivegrid", "*/container", "*/page"],
+        enable_haiku_prefilter=False,
     )
 
 
@@ -155,16 +155,15 @@ class TestBugConditionExploration:
 
         settings = _make_test_settings()
 
-        # Track whether filter_by_component_type_direct is called directly
+        # Track whether filter_by_denylist_only is called directly
         filter_called_directly = False
         filter_call_args = {}
 
-        def mock_filter_direct(model_json, allowlist, denylist):
+        def mock_filter_direct(model_json, denylist):
             nonlocal filter_called_directly, filter_call_args
             filter_called_directly = True
             filter_call_args = {
                 "payload_bytes": len(json.dumps(model_json)),
-                "allowlist": allowlist,
                 "denylist": denylist,
             }
             # Return realistic filtered nodes (much smaller than input)
@@ -208,7 +207,7 @@ class TestBugConditionExploration:
         # Patch BedrockModel and Agent to avoid real AWS calls
         with patch("src.agents.extractor.BedrockModel") as mock_bedrock, \
              patch("src.agents.extractor.Agent") as mock_agent_cls, \
-             patch("src.agents.extractor.filter_by_component_type_direct", side_effect=mock_filter_direct) as mock_filter, \
+             patch("src.agents.extractor.filter_by_denylist_only", side_effect=mock_filter_direct) as mock_filter, \
              patch("src.agents.extractor.httpx") as mock_httpx:
 
             mock_model = MagicMock()

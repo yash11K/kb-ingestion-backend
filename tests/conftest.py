@@ -35,7 +35,6 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         "AEM_REQUEST_TIMEOUT": "30",
         "AUTO_APPROVE_THRESHOLD": "0.7",
         "AUTO_REJECT_THRESHOLD": "0.2",
-        "ALLOWLIST": '["*/accordionitem","*/text","*/richtext","*/tabitem"]',
         "DENYLIST": '["*/responsivegrid","*/container","*/page"]',
     }
     for key, value in env_vars.items():

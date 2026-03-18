@@ -1,7 +1,8 @@
 """Validator Agent definition.
 
-Wraps a Strands Agent with BedrockModel and validation tools to score
-markdown files on metadata completeness, semantic quality, and uniqueness.
+Uses Haiku to score markdown files on metadata completeness, semantic quality,
+and uniqueness. Haiku reads YAML frontmatter natively — no parse_frontmatter
+tool needed. Only check_duplicate remains as a tool.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from strands.models.bedrock import BedrockModel
 from src.config import Settings
 from src.models.schemas import MarkdownFile, ValidationBreakdown, ValidationResult
 from src.tools.duplicate_checker import check_duplicate, set_db_pool
-from src.tools.frontmatter_parser import parse_frontmatter
 
 if TYPE_CHECKING:
     from src.services.stream_manager import StreamManager
@@ -32,37 +32,30 @@ You must also classify the document type based on its content.
 
 Follow these steps exactly:
 
-1. Use the parse_frontmatter tool to parse the YAML frontmatter of the \
-provided markdown content. Examine the result to determine which required \
-fields are present and valid.
+1. Read the YAML frontmatter directly from the markdown content. Check which \
+required fields are present and non-empty. Required fields: title, content_type, \
+source_url, component_type, key, namespace, region, brand.
 
 2. Score metadata_completeness from 0.0 to 0.3:
-   - 0.3 if ALL required frontmatter fields are present and non-empty \
-(title, content_type, source_url, component_type, aem_node_id, modify_date, \
-extracted_at, parent_context, region, brand).
-   - Deduct proportionally for each missing or empty field. With 10 required \
-fields, each field is worth 0.03.
+   - 0.3 if ALL required frontmatter fields are present and non-empty.
+   - Deduct proportionally for each missing or empty field. With 8 required \
+fields, each field is worth 0.0375.
 
 3. Score semantic_quality from 0.0 to 0.5:
-   - Evaluate the markdown body for coherence, readability, and completeness.
    - 0.5 for well-structured, coherent, readable content with clear meaning.
    - 0.3-0.4 for adequate content with minor issues.
    - 0.1-0.2 for poor quality, incoherent, or very short content.
    - 0.0 for empty or meaningless content.
 
-4. Use the check_duplicate tool with the content_hash to check for duplicates \
-in the knowledge base.
+4. Use the check_duplicate tool with the content_hash to check for duplicates.
    - Score uniqueness as 0.2 if the content is NOT a duplicate.
    - Score uniqueness as 0.0 if the content IS a duplicate.
 
 5. Compute the total score as: metadata_completeness + semantic_quality + uniqueness.
 
-6. Collect any issues found (missing fields, quality problems, duplicates) \
-into a list of short descriptive strings.
+6. Collect any issues found into a list of short descriptive strings.
 
-7. Classify the document type based on the actual content of the markdown body. \
-Do NOT use the AEM component_type or content_type fields — determine the type \
-purely from the content semantics. Use one of these categories:
+7. Classify the document type based on the actual content semantics:
    - "TnC" for terms and conditions, legal agreements, policies
    - "FAQ" for frequently asked questions, Q&A content
    - "ProductGuide" for product descriptions, feature guides, how-to guides
@@ -70,7 +63,7 @@ purely from the content semantics. Use one of these categories:
    - "Marketing" for promotional content, campaigns, offers
    - "General" for content that doesn't fit the above categories
 
-8. Return your result as a single JSON object with this exact structure:
+8. Return your result as a single JSON object:
 {
   "score": <total_score>,
   "breakdown": {
@@ -92,17 +85,16 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
 
 
 class ValidatorAgent:
-    """Wraps the Strands Agent with validation tools."""
+    """Wraps the Strands Agent with validation tools (Haiku-based)."""
 
     def __init__(self, settings: Settings, db_pool: asyncpg.Pool) -> None:
         self._model_kwargs = dict(
-            model_id=settings.bedrock_model_id,
+            model_id=settings.haiku_model_id,
             region_name=settings.aws_region,
-            max_tokens=settings.bedrock_max_tokens,
+            max_tokens=4096,
         )
-        self._tools = [check_duplicate, parse_frontmatter]
+        self._tools = [check_duplicate]
         self.settings = settings
-        # Configure the duplicate checker tool with the DB pool
         set_db_pool(db_pool)
 
     async def validate(
@@ -111,26 +103,13 @@ class ValidatorAgent:
         job_id: UUID | None = None,
         stream_manager: "StreamManager | None" = None,
     ) -> ValidationResult:
-        """Score a markdown file on metadata, semantics, and uniqueness.
-
-        Creates a fresh Agent per invocation to avoid shared conversation
-        history across requests, and uses ``invoke_async`` so async tools
-        (like ``check_duplicate``) run on the caller's event loop.
-
-        Args:
-            md_file: The MarkdownFile to validate.
-            job_id: Optional job ID for SSE streaming.
-            stream_manager: Optional stream manager for SSE events.
-
-        Returns:
-            ValidationResult with score, breakdown, and issues.
-        """
+        """Score a markdown file on metadata, semantics, and uniqueness."""
         prompt = (
             f"Validate the following markdown file.\n\n"
             f"Content hash: {md_file.content_hash}\n\n"
             f"Full markdown content:\n"
             f"---START---\n{md_file.md_content}\n---END---\n\n"
-            f"Parse the frontmatter, evaluate semantic quality of the body, "
+            f"Read the frontmatter directly, evaluate semantic quality of the body, "
             f"check for duplicates using the content hash, and return the "
             f"validation scores as a JSON object."
         )
@@ -158,11 +137,6 @@ class ValidatorAgent:
                     })
             elif "result" in kwargs:
                 logger.info("Validator agent completed response")
-                if stream_manager and job_id:
-                    stream_manager.publish(job_id, "agent_log", {
-                        "agent": "validator",
-                        "message": "Validator agent completed response",
-                    })
             elif "message" in kwargs and kwargs["message"].get("role") == "assistant":
                 content = kwargs["message"].get("content", "")
                 text = ""
@@ -186,12 +160,7 @@ class ValidatorAgent:
 
     @staticmethod
     def _parse_result(result: Any) -> ValidationResult:
-        """Parse the agent response into a ValidationResult.
-
-        Extracts JSON from the agent response text, clamps sub-scores to
-        their valid ranges as a safety measure, and recomputes the total
-        score as the sum of clamped sub-scores.
-        """
+        """Parse the agent response into a ValidationResult."""
         text = str(result)
         data = _extract_json_object(text)
 
@@ -221,18 +190,14 @@ class ValidatorAgent:
             float(breakdown_data.get("uniqueness", 0.0)), 0.0, 0.2
         )
 
-        # Recompute total score as sum of clamped sub-scores
         score = round(metadata_completeness + semantic_quality + uniqueness, 10)
-        # Clamp final score to [0.0, 1.0]
         score = _clamp(score, 0.0, 1.0)
 
         issues = data.get("issues", [])
         if not isinstance(issues, list):
             issues = []
-        # Ensure all issues are strings
         issues = [str(i) for i in issues]
 
-        # Extract AI-classified document type
         valid_doc_types = {"TnC", "FAQ", "ProductGuide", "Support", "Marketing", "General"}
         doc_type = data.get("doc_type", "General")
         if doc_type not in valid_doc_types:
@@ -254,7 +219,6 @@ class ValidatorAgent:
 
 def _extract_json_object(text: str) -> dict | None:
     """Extract a JSON object from text, trying multiple strategies."""
-    # Strategy 1: Try parsing the entire text as JSON
     try:
         data = json.loads(text.strip())
         if isinstance(data, dict):
@@ -262,7 +226,6 @@ def _extract_json_object(text: str) -> dict | None:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Strategy 2: Find JSON object delimiters in the text
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:

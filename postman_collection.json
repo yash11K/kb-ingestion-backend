@@ -281,7 +281,8 @@
                 { "key": "region", "value": "", "disabled": true },
                 { "key": "brand", "value": "", "disabled": true },
                 { "key": "content_type", "value": "", "disabled": true },
-                { "key": "component_type", "value": "", "disabled": true }
+                { "key": "component_type", "value": "", "disabled": true },
+                { "key": "source_id", "value": "", "disabled": true }
               ]
             },
             "description": "List all tracked files with optional filters."
@@ -435,7 +436,9 @@
               "exec": [
                 "if (pm.response.code === 200) {",
                 "    var jsonData = pm.response.json();",
-                "    pm.collectionVariables.set('job_id', jsonData.job_id);",
+                "    if (jsonData.jobs && jsonData.jobs.length > 0) {",
+                "        pm.collectionVariables.set('job_id', jsonData.jobs[0].job_id);",
+                "    }",
                 "}"
               ],
               "type": "text/javascript"

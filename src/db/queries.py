@@ -460,7 +460,7 @@ async def get_stats(pool: asyncpg.Pool) -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_ALLOWED_FILTERS = {"status", "region", "brand", "content_type", "component_type"}
+_ALLOWED_FILTERS = {"status", "region", "brand", "content_type", "component_type", "source_id"}
 
 
 def _build_where(filters: dict) -> tuple[list[str], list]:
@@ -579,6 +579,48 @@ async def list_deep_links(
     )
     return [dict(r) for r in rows]
 
+async def list_all_deep_links(
+    pool: asyncpg.Pool,
+    status: str | None = None,
+    page: int = 1,
+    size: int = 50,
+) -> tuple[list[dict], int]:
+    """Return all deep links across all sources, optionally filtered by status.
+
+    Returns (rows, total_count) for pagination.
+    """
+    where = "WHERE status = $1" if status else ""
+    params: list = [status] if status else []
+
+    count_q = f"SELECT COUNT(*) FROM deep_links {where}"
+    total = await pool.fetchval(count_q, *params)
+
+    offset = (page - 1) * size
+    if status:
+        data_q = f"""
+            SELECT dl.id, dl.source_id, dl.url, dl.model_json_url,
+                   dl.anchor_text, dl.found_in_node, dl.found_in_page,
+                   dl.status, dl.created_at
+            FROM deep_links dl
+            {where}
+            ORDER BY dl.created_at DESC
+            LIMIT $2 OFFSET $3
+        """
+        rows = await pool.fetch(data_q, status, size, offset)
+    else:
+        data_q = """
+            SELECT dl.id, dl.source_id, dl.url, dl.model_json_url,
+                   dl.anchor_text, dl.found_in_node, dl.found_in_page,
+                   dl.status, dl.created_at
+            FROM deep_links dl
+            ORDER BY dl.created_at DESC
+            LIMIT $1 OFFSET $2
+        """
+        rows = await pool.fetch(data_q, size, offset)
+
+    return [dict(r) for r in rows], total
+
+
 
 async def bulk_update_deep_link_status(
     pool: asyncpg.Pool,
@@ -593,41 +635,51 @@ async def bulk_update_deep_link_status(
     )
 
 
+
 async def insert_deep_link_ingestion_jobs(
     pool: asyncpg.Pool,
     source_id: UUID,
     link_ids: list[UUID],
-) -> tuple[UUID, list[str]]:
-    """Create an ingestion job for confirmed deep links.
+) -> list[tuple[UUID, str]]:
+    """Create one ingestion job per confirmed deep link.
 
-    Returns (job_id, list_of_model_json_urls).
+    Returns a list of (job_id, model_json_url) tuples — one per link.
     """
-    # Get the model.json URLs for confirmed links
+    # Get the model.json URLs for confirmed links, preserving link ID order
     rows = await pool.fetch(
-        "SELECT model_json_url FROM deep_links WHERE id = ANY($1::uuid[])",
+        "SELECT id, model_json_url FROM deep_links WHERE id = ANY($1::uuid[])",
         link_ids,
     )
-    urls = [r["model_json_url"] for r in rows]
 
-    if not urls:
+    if not rows:
         raise ValueError("No valid deep link URLs found for the given IDs")
 
-    # Create job
-    job_row = await pool.fetchrow(
-        """
-        INSERT INTO ingestion_jobs (source_url, source_id, status, started_at)
-        VALUES ($1, $2, 'in_progress', NOW())
-        RETURNING id
-        """,
-        urls[0],
-        source_id,
-    )
-    job_id = job_row["id"]
+    results: list[tuple[UUID, str]] = []
 
-    # Mark links as ingested
-    await bulk_update_deep_link_status(pool, link_ids, "ingested")
+    for row in rows:
+        link_id = row["id"]
+        url = row["model_json_url"]
 
-    return job_id, urls
+        # Create a dedicated job for this link
+        job_row = await pool.fetchrow(
+            """
+            INSERT INTO ingestion_jobs (source_url, source_id, status, started_at)
+            VALUES ($1, $2, 'in_progress', NOW())
+            RETURNING id
+            """,
+            url,
+            source_id,
+        )
+        job_id = job_row["id"]
+
+        # Mark this individual link as ingested
+        await bulk_update_deep_link_status(pool, [link_id], "ingested")
+
+        results.append((job_id, url))
+
+    return results
+
+
 
 
 # ---------------------------------------------------------------------------

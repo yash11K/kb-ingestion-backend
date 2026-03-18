@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, EnvSettingsSource, PydanticBaseSettingsSource
 
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     s3_bucket_name: str
     bedrock_model_id: str = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    bedrock_kb_id: str = ""  # AWS Bedrock Knowledge Base ID
 
     # AEM
     aem_request_timeout: int = 30  # seconds
@@ -41,9 +42,9 @@ class Settings(BaseSettings):
     auto_approve_threshold: float = 0.7
     auto_reject_threshold: float = 0.2
 
-    # Component filtering
-    allowlist: list[str]  # e.g. ["*/accordionitem", "*/text", ...]
-    denylist: list[str]  # e.g. ["*/responsivegrid", "*/container", ...]
+    # Component filtering (legacy — kept for backward compat with tests)
+    allowlist: list[str] = []
+    denylist: list[str] = []
 
     # Payload size threshold (bytes) for pre-filtering large AEM JSON
     max_payload_bytes: int = 500_000
@@ -57,9 +58,10 @@ class Settings(BaseSettings):
     # Concurrency
     max_concurrent_jobs: int = 3  # MAX_CONCURRENT_JOBS env var
 
-    # Haiku pre-filter
+    # Haiku discovery agent
     haiku_model_id: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
-    enable_haiku_prefilter: bool = True
+    enable_haiku_discovery: bool = True
+    haiku_max_input_tokens: int = 150_000  # max tokens to send to Haiku in one call
 
     # URL denylist patterns for deep link filtering
     url_denylist_patterns: list[str] = [
@@ -100,45 +102,6 @@ class Settings(BaseSettings):
         "en-au": "apac",
         "en-nz": "apac",
     }
-    component_denylist_defaults: list[str] = Field(  # AEM_COMPONENT_DENYLIST env var
-        default=[
-            "*/loginModal",
-            "*/bookingwidget",
-            "*/image",
-            "*/ghost",
-            "*/divider",
-            "*/breadcrumb",
-            "*/languagenavigation",
-            "*/experiencefragment",
-            "*/embed",
-            "*/separator",
-            "*/search",
-            "*/form",
-            "*/button",
-        ],
-        validation_alias=AliasChoices(
-            "component_denylist_defaults", "aem_component_denylist"
-        ),
-    )
-    component_allowlist_defaults: list[str] = Field(  # AEM_COMPONENT_ALLOWLIST env var
-        default=[
-            "*/text",
-            "*/richtext",
-            "*/accordion",
-            "*/accordionitem",
-            "*/faq",
-            "*/table",
-            "*/title",
-            "*/teaser",
-            "*/contentcardelement",
-            "*/contentfragmentlist",
-            "*/tabs",
-        ],
-        validation_alias=AliasChoices(
-            "component_allowlist_defaults", "aem_component_allowlist"
-        ),
-    )
-
     @field_validator("batch_threshold")
     @classmethod
     def batch_threshold_min(cls, v: int) -> int:

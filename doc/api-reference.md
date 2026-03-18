@@ -265,7 +265,7 @@ Updates the Markdown content, recomputes the content hash, preserves current sta
 
 List all tracked files with optional filters.
 
-**Query params:** `status`, `region`, `brand`, `content_type`, `component_type`, `page`, `size`
+**Query params:** `status`, `region`, `brand`, `content_type`, `component_type`, `source_id`, `page`, `size`
 
 ### GET /files/{file_id}
 
@@ -413,7 +413,7 @@ List deep links for a specific source, filtered by status.
 
 ### POST /deep-links/{source_id}/confirm
 
-Confirm selected deep links and start ingestion for them.
+Confirm selected deep links and start one ingestion job per link.
 
 **Request:**
 ```json
@@ -422,11 +422,13 @@ Confirm selected deep links and start ingestion for them.
 }
 ```
 
-**Response (202):**
+**Response (200):**
 ```json
 {
-  "source_id": "uuid",
-  "job_id": "uuid",
+  "jobs": [
+    { "source_id": "uuid", "job_id": "uuid-job-1", "url": "https://example.com/page-1.model.json" },
+    { "source_id": "uuid", "job_id": "uuid-job-2", "url": "https://example.com/page-2.model.json" }
+  ],
   "status": "in_progress"
 }
 ```

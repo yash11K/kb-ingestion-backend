@@ -28,12 +28,29 @@ class JobStatus(str, Enum):
 # --- Internal Models ---
 
 
+class DiscoveredContent(BaseModel):
+    """A content item identified by the Haiku discovery agent from raw AEM JSON."""
+    path: str                            # JSON tree path (e.g. "/root/container/text")
+    component_type: str                  # AEM :type value
+    title: str                           # inferred title
+    content: str                         # cleaned text content (HTML stripped)
+    modify_date: str | None = None       # from dataLayer repo:modifyDate if present
+
+
+class DiscoveryResult(BaseModel):
+    """Output of the Haiku discovery agent: content items + deep links."""
+    content_items: list[DiscoveredContent]
+    deep_links: list["DeepLink"] = Field(default_factory=list)
+
+
 class ContentNode(BaseModel):
-    node_type: str                       # :type value
-    aem_node_id: str                     # path/key in the JSON tree
-    html_content: str                    # raw HTML from the node
-    parent_context: str                  # parent node path
-    metadata: dict                       # additional node metadata
+    """DEPRECATED: Kept for backward compatibility with tests.
+    Use DiscoveredContent instead."""
+    node_type: str
+    aem_node_id: str
+    html_content: str
+    parent_context: str
+    metadata: dict = Field(default_factory=dict)
 
 
 class MarkdownFile(BaseModel):
@@ -106,13 +123,6 @@ class DuplicateCheckResult(BaseModel):
     existing_file_id: UUID | None = None
 
 
-class FrontmatterResult(BaseModel):
-    metadata: dict
-    body: str
-    missing_fields: list[str]
-    valid: bool
-
-
 # --- API Request Models ---
 
 
@@ -164,6 +174,8 @@ class BatchIngestItem(BaseModel):
 class BatchIngestResponse(BaseModel):
     jobs: list[BatchIngestItem]
     status: JobStatus
+    source_id: UUID | None = None
+
 
 
 class RevalidateResponse(BaseModel):
@@ -374,6 +386,7 @@ class DeepLink(BaseModel):
 
 class DeepLinkResponse(BaseModel):
     id: UUID
+    source_id: UUID | None = None
     url: str
     model_json_url: str
     anchor_text: str | None

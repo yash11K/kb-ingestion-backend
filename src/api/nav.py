@@ -1,6 +1,7 @@
 """Navigation tree and deep link API endpoints.
 
 GET  /nav/tree                       – parse AEM model.json into a navigation tree
+GET  /deep-links                     – list all deep links (paginated, filterable)
 GET  /deep-links/{source_id}         – list pending deep links for a source
 POST /deep-links/{source_id}/confirm – confirm deep links for ingestion
 POST /deep-links/{source_id}/dismiss – dismiss deep links
@@ -19,17 +20,20 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from src.db.queries import (
     get_nav_tree_cache,
     insert_deep_link_ingestion_jobs,
+    list_all_deep_links,
     list_deep_links,
     bulk_update_deep_link_status,
     upsert_nav_tree_cache,
 )
 from src.models.schemas import (
+    BatchIngestItem,
+    BatchIngestResponse,
     DeepLinkConfirmRequest,
     DeepLinkDismissRequest,
     DeepLinkResponse,
-    IngestResponse,
     JobStatus,
     NavTree,
+    PaginatedResponse,
 )
 from src.services.nav_parser import parse
 
@@ -90,6 +94,21 @@ async def get_nav_tree(
     return nav_tree
 
 
+@router.get("/deep-links")
+async def get_all_deep_links(
+    request: Request,
+    status: str | None = Query(default=None, description="Filter by status: pending, confirmed, dismissed, ingested"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=100),
+) -> PaginatedResponse[DeepLinkResponse]:
+    """List all deep links across all sources, with optional status filter and pagination."""
+    db_pool = request.app.state.db_pool
+    rows, total = await list_all_deep_links(db_pool, status=status, page=page, size=size)
+    items = [DeepLinkResponse(**r) for r in rows]
+    pages = max(1, -(-total // size))  # ceil division
+    return PaginatedResponse(items=items, total=total, page=page, size=size, pages=pages)
+
+
 @router.get("/deep-links/{source_id}")
 async def get_deep_links(
     source_id: UUID,
@@ -108,25 +127,28 @@ async def confirm_deep_links(
     body: DeepLinkConfirmRequest,
     background_tasks: BackgroundTasks,
     request: Request,
-) -> IngestResponse:
-    """Confirm selected deep links and start ingestion for them."""
+) -> BatchIngestResponse:
+    """Confirm selected deep links and start one ingestion job per link."""
     db_pool = request.app.state.db_pool
     pipeline_service = request.app.state.pipeline_service
 
     # Mark as confirmed
     await bulk_update_deep_link_status(db_pool, body.link_ids, "confirmed")
 
-    # Get the confirmed links' model.json URLs
-    job_id, urls = await insert_deep_link_ingestion_jobs(
+    # Create one job per deep link
+    job_url_pairs = await insert_deep_link_ingestion_jobs(
         db_pool, source_id, body.link_ids,
     )
 
-    # Launch pipeline
-    background_tasks.add_task(
-        pipeline_service.run, job_id, urls, source_id,
-    )
+    # Launch a separate pipeline per job
+    jobs: list[BatchIngestItem] = []
+    for job_id, url in job_url_pairs:
+        background_tasks.add_task(
+            pipeline_service.run, job_id, [url], source_id,
+        )
+        jobs.append(BatchIngestItem(source_id=source_id, job_id=job_id, url=url))
 
-    return IngestResponse(source_id=source_id, job_id=job_id, status=JobStatus.IN_PROGRESS)
+    return BatchIngestResponse(jobs=jobs, status=JobStatus.IN_PROGRESS)
 
 
 @router.post("/deep-links/{source_id}/dismiss")

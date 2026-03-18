@@ -1,42 +1,41 @@
 """Pipeline orchestration service.
 
-Coordinates the full ingestion pipeline: fetch → extract → insert to DB →
-validate → route → upload approved → complete job.
+Simplified flow: fetch JSON once → Haiku discovery (content + links) →
+Sonnet extraction → Haiku validation → route → upload.
 
-Processes a flat list of URLs (no BFS crawling). Deep links are discovered
-and stored for user confirmation, not auto-followed.
+3 agent calls per URL, no Python filtering, no allowlist/denylist config.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import UUID
 
 import asyncpg
+import httpx
 import frontmatter as fm_lib
 
-from src.agents.extractor import ExtractorAgent, PostProcessor
+from src.agents.discovery import DiscoveryAgent
+from src.agents.extractor import ExtractorAgent
 from src.agents.validator import ValidatorAgent
 from src.config import Settings
 from src.db.queries import (
-    find_by_content_hash,
     insert_deep_links,
     insert_kb_file,
     update_ingestion_job,
     update_kb_file_status,
 )
 from src.models.schemas import ExtractionOutput, FileStatus, MarkdownFile
-from src.services.deep_link_extractor import extract_deep_links
 from src.services.s3_upload import S3UploadService
 from src.services.stream_manager import StreamManager
 from src.utils.url_inference import (
     infer_brand,
     infer_namespace,
     infer_region,
-    normalize_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +46,7 @@ class PipelineService:
 
     def __init__(
         self,
+        discovery: DiscoveryAgent,
         extractor: ExtractorAgent,
         validator: ValidatorAgent,
         db_pool: asyncpg.Pool,
@@ -54,6 +54,7 @@ class PipelineService:
         settings: Settings,
         stream_manager: StreamManager,
     ) -> None:
+        self.discovery = discovery
         self.extractor = extractor
         self.validator = validator
         self.db_pool = db_pool
@@ -68,12 +69,7 @@ class PipelineService:
         urls: list[str],
         source_id: UUID | None = None,
     ) -> None:
-        """Execute the ingestion pipeline for a list of URLs.
-
-        Processes each URL sequentially: fetch → extract → validate → route → upload.
-        Discovers deep links in content and stores them for user confirmation.
-        """
-        # Register stream immediately so SSE clients can connect
+        """Execute the ingestion pipeline for a list of URLs."""
         self.stream_manager.register(job_id)
         self.stream_manager.publish(job_id, "queued", {
             "stage": "queued",
@@ -81,7 +77,6 @@ class PipelineService:
         })
 
         try:
-            # Acquire semaphore — blocks if max_concurrent_jobs reached
             async with self._concurrency_sem:
                 self.stream_manager.publish(job_id, "progress", {
                     "stage": "started",
@@ -94,8 +89,7 @@ class PipelineService:
                         "Pipeline failed for job_id=%s: %s", job_id, exc, exc_info=True
                     )
                     await update_ingestion_job(
-                        self.db_pool,
-                        job_id,
+                        self.db_pool, job_id,
                         status="failed",
                         error_message=str(exc),
                         completed_at=datetime.now(timezone.utc),
@@ -112,10 +106,9 @@ class PipelineService:
         urls: list[str],
         source_id: UUID | None,
     ) -> None:
-        """Process each URL in the flat list sequentially."""
+        """Process each URL sequentially."""
         sm = self.stream_manager
 
-        # Job-level counters
         total_files_created = 0
         total_files_auto_approved = 0
         total_files_pending_review = 0
@@ -132,21 +125,18 @@ class PipelineService:
                 "page_index": page_index,
             })
 
-            # Infer metadata from URL
             brand = infer_brand(url)
             region = infer_region(url, self.settings.locale_region_map)
             namespace = infer_namespace(url, self.settings.namespace_list)
 
             counters, deep_links_found = await self._process_single_url(
-                url, brand, region, namespace,
-                job_id, source_id,
+                url, brand, region, namespace, job_id, source_id,
             )
 
             if counters.get("_failed"):
                 failed_count += 1
                 continue
 
-            # Accumulate counters
             total_files_created += counters.get("files_created", 0)
             total_files_auto_approved += counters.get("files_auto_approved", 0)
             total_files_pending_review += counters.get("files_pending_review", 0)
@@ -162,7 +152,6 @@ class PipelineService:
                 "deep_links_found": deep_links_found,
             })
 
-        # Emit summary
         sm.publish(job_id, "crawl_summary", {
             "total_pages": pages_processed,
             "total_files": total_files_created,
@@ -179,10 +168,8 @@ class PipelineService:
                 ),
             })
 
-        # Update job with final counters
         await update_ingestion_job(
-            self.db_pool,
-            job_id,
+            self.db_pool, job_id,
             status="completed",
             files_created=total_files_created,
             files_auto_approved=total_files_auto_approved,
@@ -219,10 +206,9 @@ class PipelineService:
         job_id: UUID,
         source_id: UUID | None,
     ) -> tuple[dict, int]:
-        """Extract → validate → route → upload for one URL.
+        """Fetch → discover → extract → validate → route → upload for one URL.
 
         Returns (counters_dict, deep_links_count).
-        On error: returns ({"_failed": True}, 0).
         """
         sm = self.stream_manager
         counters = {
@@ -234,43 +220,83 @@ class PipelineService:
         }
 
         try:
-            # 1. Fetch & extract
+            # 1. Fetch JSON once
             logger.info("Starting extraction for job_id=%s url=%s", job_id, url)
             sm.publish(job_id, "progress", {
-                "stage": "extraction",
-                "message": f"Fetching and extracting content from {url}",
+                "stage": "fetch",
+                "message": f"Fetching AEM JSON from {url}",
             })
-            extraction: ExtractionOutput = await self.extractor.extract(
-                url, region, brand, job_id, sm
+
+            resp = httpx.get(url, timeout=self.settings.aem_request_timeout)
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"AEM endpoint returned HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+            aem_json = resp.json()
+
+            payload_bytes = len(json.dumps(aem_json))
+            logger.info(
+                "Raw AEM JSON payload: %d bytes, estimated %d tokens",
+                payload_bytes, payload_bytes // 4,
             )
 
-            all_results = extraction.files
-            child_urls = extraction.child_urls
+            # 2. Haiku discovery (content + deep links in one pass)
+            sm.publish(job_id, "progress", {
+                "stage": "discovery",
+                "message": f"Haiku discovering content and links from {url}",
+            })
+            discovery = await self.discovery.discover(aem_json, url)
 
-            # Patch namespace and rebuild frontmatter
-            md_files: list[MarkdownFile] = []
-            for f in all_results:
-                fm_metadata = {
-                    "key": f.key,
-                    "namespace": namespace,
-                    "brand": brand,
-                    "region": region,
-                    "source_url": f.source_url,
-                    "parent_context": "",
-                    "title": f.title,
-                }
-                post = fm_lib.Post(f.md_body, **fm_metadata)
-                md_content = fm_lib.dumps(post)
+            logger.info(
+                "Discovery complete: %d content items, %d deep links from %s",
+                len(discovery.content_items), len(discovery.deep_links), url,
+            )
 
-                updated = f.model_copy(update={
-                    "namespace": namespace,
-                    "parent_context": "",
-                    "brand": brand,
-                    "region": region,
-                    "md_content": md_content,
-                })
-                md_files.append(updated)
+            # 3. Store deep links
+            deep_links_count = 0
+            if discovery.deep_links and source_id:
+                try:
+                    link_dicts = [
+                        {
+                            "source_id": source_id,
+                            "job_id": job_id,
+                            "url": dl.url,
+                            "model_json_url": dl.model_json_url,
+                            "anchor_text": dl.anchor_text,
+                            "found_in_node": dl.found_in_node,
+                            "found_in_page": dl.found_in_page,
+                        }
+                        for dl in discovery.deep_links
+                    ]
+                    await insert_deep_links(self.db_pool, link_dicts)
+                    deep_links_count = len(discovery.deep_links)
+                    logger.info(
+                        "Stored %d deep links from %s",
+                        deep_links_count, url,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to store deep links: %s", exc)
 
+            if not discovery.content_items:
+                logger.info("No content items discovered for %s", url)
+                return counters, deep_links_count
+
+            # 4. Sonnet extraction
+            sm.publish(job_id, "progress", {
+                "stage": "extraction",
+                "message": f"Extracting {len(discovery.content_items)} content items from {url}",
+            })
+            extraction: ExtractionOutput = await self.extractor.extract(
+                content_items=discovery.content_items,
+                url=url,
+                region=region,
+                brand=brand,
+                namespace=namespace,
+                job_id=job_id,
+                stream_manager=sm,
+            )
+
+            md_files = extraction.files
             total_nodes = len(md_files)
             logger.info(
                 "Extraction complete for job_id=%s url=%s: %d markdown files",
@@ -282,70 +308,7 @@ class PipelineService:
                 "total_nodes": total_nodes,
             })
 
-            # 2. Discover deep links in content
-            deep_links_count = 0
-            try:
-                parsed_url = urlparse(url)
-                base_host = f"{parsed_url.scheme}://{parsed_url.netloc}"
-
-                # Get content nodes from the extraction for deep link scanning
-                # We use the extraction's child_urls discovery as a baseline
-                # but also scan HTML content for embedded links
-                from src.models.schemas import ContentNode
-                # Re-extract content nodes for deep link scanning
-                # (the extractor already has them, but we need the raw nodes)
-                import httpx
-                import json
-                try:
-                    resp = httpx.get(url, timeout=self.settings.aem_request_timeout)
-                    if resp.status_code == 200:
-                        aem_json = resp.json()
-                        if self.settings.enable_haiku_prefilter:
-                            from src.services.haiku_prefilter import HaikuPrefilter
-                            prefilter = HaikuPrefilter(self.settings)
-                            content_nodes = prefilter.identify_content_paths(aem_json)
-                        else:
-                            from src.tools.filter_components import filter_by_component_type_direct
-                            content_nodes = filter_by_component_type_direct(
-                                aem_json,
-                                self.settings.allowlist,
-                                self.settings.denylist,
-                            )
-
-                        deep_links = extract_deep_links(
-                            content_nodes,
-                            source_page_url=url,
-                            base_host=base_host,
-                            url_denylist_patterns=self.settings.url_denylist_patterns,
-                        )
-
-                        if deep_links and source_id:
-                            link_dicts = [
-                                {
-                                    "source_id": source_id,
-                                    "job_id": job_id,
-                                    "url": dl.url,
-                                    "model_json_url": dl.model_json_url,
-                                    "anchor_text": dl.anchor_text,
-                                    "found_in_node": dl.found_in_node,
-                                    "found_in_page": dl.found_in_page,
-                                }
-                                for dl in deep_links
-                            ]
-                            await insert_deep_links(self.db_pool, link_dicts)
-                            deep_links_count = len(deep_links)
-                            logger.info(
-                                "Stored %d deep links from %s for user confirmation",
-                                deep_links_count, url,
-                            )
-                except Exception as exc:
-                    logger.warning(
-                        "Deep link extraction failed for %s: %s", url, exc,
-                    )
-            except Exception as exc:
-                logger.warning("Deep link discovery failed: %s", exc)
-
-            # 3. Process each file
+            # 5. Per file: insert → validate → route → upload
             for idx, md_file in enumerate(md_files, 1):
                 sm.publish(job_id, "progress", {
                     "stage": "processing",
@@ -364,15 +327,12 @@ class PipelineService:
                         "current": idx,
                         "total": total_nodes,
                     })
-                    validation = await self.validator.validate(
-                        md_file, job_id, sm
-                    )
+                    validation = await self.validator.validate(md_file, job_id, sm)
 
                     status = self._route_by_score(validation.score)
 
                     await update_kb_file_status(
-                        self.db_pool,
-                        file_id,
+                        self.db_pool, file_id,
                         status=status.value,
                         validation_score=validation.score,
                         validation_breakdown=validation.breakdown.model_dump(),
@@ -406,13 +366,7 @@ class PipelineService:
                         "Validation failed for file_id=%s: %s",
                         file_id, exc, exc_info=True,
                     )
-                    sm.publish(job_id, "progress", {
-                        "stage": "validation_error",
-                        "message": f"Validation failed for {md_file.filename}: {exc}",
-                        "filename": md_file.filename,
-                    })
                     counters["files_pending_review"] += 1
-                    continue
 
             return counters, deep_links_count
 
@@ -427,9 +381,12 @@ class PipelineService:
             })
             return {"_failed": True}, 0
 
-    async def _insert_file(self, md_file: MarkdownFile,
-                           source_id: UUID | None = None,
-                           job_id: UUID | None = None) -> UUID:
+    async def _insert_file(
+        self,
+        md_file: MarkdownFile,
+        source_id: UUID | None = None,
+        job_id: UUID | None = None,
+    ) -> UUID:
         """Insert a MarkdownFile into the DB with pending_review status."""
         file_dict = {
             "filename": md_file.filename,
@@ -465,12 +422,11 @@ class PipelineService:
     async def _upload_to_s3(
         self, file_id: UUID, md_file: MarkdownFile,
     ) -> None:
-        """Upload an approved file to S3 and update its DB status to in_s3."""
+        """Upload an approved file to S3 and update its DB status."""
         try:
             result = await self.s3_service.upload(md_file, file_id)
             await update_kb_file_status(
-                self.db_pool,
-                file_id,
+                self.db_pool, file_id,
                 status=FileStatus.IN_S3.value,
                 s3_bucket=result.s3_bucket,
                 s3_key=result.s3_key,
@@ -479,6 +435,5 @@ class PipelineService:
         except Exception:
             logger.error(
                 "S3 upload failed for file_id=%s; retaining approved status",
-                file_id,
-                exc_info=True,
+                file_id, exc_info=True,
             )

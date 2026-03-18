@@ -1,8 +1,12 @@
 """Knowledge base query service — retrieval and RAG generation.
 
-Provides two streaming flows:
-1. search(): full-text search returning ranked KB chunks as SSE events
-2. chat(): retrieval-augmented generation streaming Bedrock tokens as SSE
+Provides two modes:
+1. Local PostgreSQL full-text search (fallback when no Bedrock KB configured)
+2. AWS Bedrock Knowledge Base via Retrieve / RetrieveAndGenerate APIs
+
+Streaming flows:
+- search(): ranked KB chunks as SSE events
+- chat(): retrieval-augmented generation streaming tokens as SSE
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from src.config import Settings
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# SQL
+# SQL (local fallback)
 # ---------------------------------------------------------------------------
 
 _SEARCH_SQL = """
@@ -49,16 +53,144 @@ def _sse(event: str, data: dict) -> str:
 
 
 class KBQueryService:
-    """Stateless service — receives dependencies per call."""
+    """Query service supporting both local Postgres and Bedrock KB modes."""
 
     def __init__(self, pool: asyncpg.Pool, settings: Settings) -> None:
         self._pool = pool
         self._settings = settings
+        self._use_bedrock_kb = bool(settings.bedrock_kb_id)
 
-    # ----- search (retrieval only) -----
+    # =====================================================================
+    # search
+    # =====================================================================
 
     async def search(self, query: str, limit: int = 10) -> AsyncIterator[str]:
         """Stream search results as SSE events."""
+        if self._use_bedrock_kb:
+            async for chunk in self._bedrock_kb_search(query, limit):
+                yield chunk
+        else:
+            async for chunk in self._local_search(query, limit):
+                yield chunk
+
+    # =====================================================================
+    # chat
+    # =====================================================================
+
+    async def chat(self, query: str, limit: int = 5) -> AsyncIterator[str]:
+        """RAG endpoint — retrieve context then stream generation as SSE."""
+        if self._use_bedrock_kb:
+            async for chunk in self._bedrock_kb_chat(query, limit):
+                yield chunk
+        else:
+            async for chunk in self._local_chat(query, limit):
+                yield chunk
+
+    # =====================================================================
+    # Bedrock Knowledge Base — Retrieve
+    # =====================================================================
+
+    async def _bedrock_kb_search(self, query: str, limit: int) -> AsyncIterator[str]:
+        """Use Bedrock KB Retrieve API for semantic search."""
+        client = boto3.client(
+            "bedrock-agent-runtime", region_name=self._settings.aws_region
+        )
+
+        try:
+            response = await asyncio.to_thread(
+                client.retrieve,
+                knowledgeBaseId=self._settings.bedrock_kb_id,
+                retrievalQuery={"text": query},
+                retrievalConfiguration={
+                    "vectorSearchConfiguration": {"numberOfResults": limit}
+                },
+            )
+        except Exception as exc:
+            logger.exception("Bedrock KB Retrieve error")
+            yield _sse("error", {"message": str(exc)})
+            return
+
+        results = response.get("retrievalResults", [])
+        yield _sse("search_start", {"query": query, "total": len(results)})
+
+        for result in results:
+            content = result.get("content", {}).get("text", "")
+            location = result.get("location", {})
+            s3_uri = location.get("s3Location", {}).get("uri", "")
+            score = result.get("score", 0.0)
+            metadata = result.get("metadata", {})
+
+            yield _sse("result", {
+                "content": content,
+                "s3_uri": s3_uri,
+                "score": float(score),
+                "metadata": metadata,
+            })
+
+        yield _sse("search_end", {"query": query, "total": len(results)})
+
+    # =====================================================================
+    # Bedrock Knowledge Base — RetrieveAndGenerate
+    # =====================================================================
+
+    async def _bedrock_kb_chat(self, query: str, limit: int) -> AsyncIterator[str]:
+        """Use Bedrock KB RetrieveAndGenerate API for RAG."""
+        client = boto3.client(
+            "bedrock-agent-runtime", region_name=self._settings.aws_region
+        )
+
+        try:
+            response = await asyncio.to_thread(
+                client.retrieve_and_generate,
+                input={"text": query},
+                retrieveAndGenerateConfiguration={
+                    "type": "KNOWLEDGE_BASE",
+                    "knowledgeBaseConfiguration": {
+                        "knowledgeBaseId": self._settings.bedrock_kb_id,
+                        "modelArn": f"arn:aws:bedrock:{self._settings.aws_region}::foundation-model/{self._settings.bedrock_model_id}",
+                        "retrievalConfiguration": {
+                            "vectorSearchConfiguration": {
+                                "numberOfResults": limit,
+                            }
+                        },
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.exception("Bedrock KB RetrieveAndGenerate error")
+            yield _sse("error", {"message": str(exc)})
+            return
+
+        # Emit sources
+        citations = response.get("citations", [])
+        sources = []
+        for citation in citations:
+            for ref in citation.get("retrievedReferences", []):
+                loc = ref.get("location", {})
+                s3_uri = loc.get("s3Location", {}).get("uri", "")
+                sources.append({
+                    "s3_uri": s3_uri,
+                    "content": ref.get("content", {}).get("text", "")[:200],
+                })
+
+        yield _sse("sources", {"query": query, "sources": sources})
+
+        # Emit generated output
+        output_text = response.get("output", {}).get("text", "")
+        if output_text:
+            yield _sse("token", {"text": output_text})
+        else:
+            yield _sse("token", {"text": "No response generated from the knowledge base."})
+
+        yield _sse("done", {"query": query})
+
+
+    # =====================================================================
+    # Local Postgres fallback — search
+    # =====================================================================
+
+    async def _local_search(self, query: str, limit: int) -> AsyncIterator[str]:
+        """Stream search results from local Postgres full-text search."""
         rows = await self._pool.fetch(_SEARCH_SQL, query, limit)
 
         yield _sse("search_start", {"query": query, "total": len(rows)})
@@ -80,11 +212,12 @@ class KBQueryService:
 
         yield _sse("search_end", {"query": query, "total": len(rows)})
 
-    # ----- chat (RAG) -----
+    # =====================================================================
+    # Local Postgres fallback — chat
+    # =====================================================================
 
-    async def chat(self, query: str, limit: int = 5) -> AsyncIterator[str]:
-        """Retrieve context then stream Bedrock generation as SSE tokens."""
-        # 1. Retrieve relevant docs
+    async def _local_chat(self, query: str, limit: int) -> AsyncIterator[str]:
+        """Retrieve from Postgres then stream Bedrock converse_stream as SSE."""
         rows = await self._pool.fetch(_SEARCH_SQL, query, limit)
 
         sources = []
@@ -108,7 +241,6 @@ class KBQueryService:
 
         context_block = "\n\n---\n\n".join(context_parts)
 
-        # 2. Stream from Bedrock via converse_stream
         async for chunk in self._stream_bedrock(query, context_block):
             yield chunk
 

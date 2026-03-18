@@ -7,6 +7,7 @@ from src.tools.filter_components import (
     _is_react_or_widget,
     _has_meaningful_content,
     filter_by_component_type,
+    filter_by_denylist_only,
 )
 
 
@@ -311,3 +312,77 @@ class TestTraverseContentQualityFiltering:
         }
         results = _traverse(model, "", ["*/text"], [])
         assert len(results) == 0
+
+
+class TestFilterByDenylistOnly:
+    """Tests for the denylist-only filter (no allowlist required)."""
+
+    def test_accepts_any_content_node(self):
+        """Nodes with meaningful content are accepted regardless of type."""
+        model = {
+            ":items": {
+                "card": {":type": "avis/content/contentcardelement", "headline": "LDW", "bodyContent": "<p>Covers damage</p>"},
+            }
+        }
+        results = filter_by_denylist_only(model, [])
+        assert len(results) == 1
+        assert results[0].node_type == "avis/content/contentcardelement"
+
+    def test_denylisted_nodes_excluded(self):
+        model = {
+            ":items": {
+                "login": {":type": "core/loginModal", "text": "<p>Login</p>"},
+                "text": {":type": "core/text", "text": "<p>Content</p>"},
+            }
+        }
+        results = filter_by_denylist_only(model, ["*/loginModal"])
+        assert len(results) == 1
+        assert results[0].node_type == "core/text"
+
+    def test_react_widget_excluded(self):
+        model = {
+            ":items": {
+                "widget": {":type": "core/bookingwidget", "text": "<p>Book</p>"},
+                "text": {":type": "core/text", "text": "<p>Content</p>"},
+            }
+        }
+        results = filter_by_denylist_only(model, [])
+        assert len(results) == 1
+        assert results[0].node_type == "core/text"
+
+    def test_no_meaningful_content_excluded(self):
+        model = {
+            ":items": {
+                "empty": {":type": "core/text", "id": "abc", "i18n": {"key": "val"}},
+            }
+        }
+        results = filter_by_denylist_only(model, [])
+        assert len(results) == 0
+
+    def test_denied_node_children_still_traversed(self):
+        model = {
+            ":items": {
+                "container": {
+                    ":type": "core/container",
+                    ":items": {
+                        "text1": {":type": "core/text", "text": "<p>Nested</p>"},
+                    },
+                }
+            }
+        }
+        results = filter_by_denylist_only(model, ["*/container"])
+        assert len(results) == 1
+        assert results[0].node_type == "core/text"
+
+    def test_multiple_content_types_accepted(self):
+        """Accepts various component types — no allowlist restriction."""
+        model = {
+            ":items": {
+                "text": {":type": "core/text", "text": "<p>Text</p>"},
+                "faq": {":type": "core/faq", "description": "<p>FAQ</p>"},
+                "card": {":type": "avis/contentcardelement", "headline": "Coverage", "bodyContent": "<p>Info</p>"},
+                "footer": {":type": "avis/footerLegal", "text": "<p>Legal</p>"},
+            }
+        }
+        results = filter_by_denylist_only(model, [])
+        assert len(results) == 4

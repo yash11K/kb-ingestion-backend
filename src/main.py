@@ -7,6 +7,7 @@ import boto3
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.agents.discovery import DiscoveryAgent
 from src.agents.extractor import ExtractorAgent
 from src.agents.validator import ValidatorAgent
 from src.api.router import api_router
@@ -22,17 +23,17 @@ from src.services.stream_manager import StreamManager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown resources."""
-    # Startup
     settings = get_settings()
     pool = await create_pool(settings.database_url)
     s3_client = boto3.client("s3", region_name=settings.aws_region)
 
     s3_service = S3UploadService(s3_client, settings.s3_bucket_name)
     stream_manager = StreamManager()
+    discovery = DiscoveryAgent(settings)
     extractor = ExtractorAgent(settings)
     validator = ValidatorAgent(settings, pool)
     pipeline_service = PipelineService(
-        extractor, validator, pool, s3_service, settings, stream_manager
+        discovery, extractor, validator, pool, s3_service, settings, stream_manager
     )
     revalidation_service = RevalidationService(validator, pool, s3_service, settings)
     kb_query_service = KBQueryService(pool, settings)
@@ -47,7 +48,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     await close_pool(pool)
 
 

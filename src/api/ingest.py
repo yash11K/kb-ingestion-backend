@@ -74,7 +74,10 @@ async def start_ingestion(
             source_id=source_id, job_id=job_id, url=url,
         ))
 
-    return BatchIngestResponse(jobs=jobs, status=JobStatus.IN_PROGRESS)
+    first_source_id = jobs[0].source_id if jobs else None
+    return BatchIngestResponse(
+        jobs=jobs, status=JobStatus.IN_PROGRESS, source_id=first_source_id,
+    )
 
 
 @router.get("/jobs")

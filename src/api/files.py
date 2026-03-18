@@ -31,13 +31,14 @@ async def list_files(
     brand: str | None = None,
     content_type: str | None = None,
     component_type: str | None = None,
+    source_id: UUID | None = None,
     page: int = 1,
     size: int = 20,
 ) -> PaginatedResponse[FileSummary]:
     """Return a paginated list of all files with optional filters."""
     pool = request.app.state.db_pool
 
-    filters: dict[str, str] = {}
+    filters: dict = {}
     if status is not None:
         filters["status"] = status
     if region is not None:
@@ -48,6 +49,8 @@ async def list_files(
         filters["content_type"] = content_type
     if component_type is not None:
         filters["component_type"] = component_type
+    if source_id is not None:
+        filters["source_id"] = source_id
 
     rows, total = await list_kb_files(pool, filters, page, size)
 
