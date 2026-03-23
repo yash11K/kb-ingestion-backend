@@ -251,6 +251,7 @@ class FileDetail(BaseModel):
     content_hash: str
     source_url: str
     component_type: str
+    source_id: UUID | None = None
     aem_node_id: str | None = None
     md_content: str
     modify_date: datetime | None = None

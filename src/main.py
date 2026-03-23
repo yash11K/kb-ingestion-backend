@@ -7,17 +7,20 @@ import boto3
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.agents.context_agent import ContextAgent
 from src.agents.discovery import DiscoveryAgent
 from src.agents.extractor import ExtractorAgent
 from src.agents.validator import ValidatorAgent
 from src.api.router import api_router
 from src.config import get_settings
 from src.db.connection import close_pool, create_pool
+from src.services.context_cache import ContextCache
 from src.services.pipeline import PipelineService
 from src.services.revalidation import RevalidationService
 from src.services.s3_upload import S3UploadService
 from src.services.kb_query import KBQueryService
 from src.services.stream_manager import StreamManager
+from src.tools.file_context import set_db_pool as set_context_db_pool
 
 
 @asynccontextmanager
@@ -37,6 +40,9 @@ async def lifespan(app: FastAPI):
     )
     revalidation_service = RevalidationService(validator, pool, s3_service, settings)
     kb_query_service = KBQueryService(pool, settings)
+    set_context_db_pool(pool)
+    context_agent = ContextAgent(settings)
+    context_cache = ContextCache()
 
     app.state.db_pool = pool
     app.state.s3_service = s3_service
@@ -44,6 +50,8 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_service = pipeline_service
     app.state.revalidation_service = revalidation_service
     app.state.kb_query_service = kb_query_service
+    app.state.context_agent = context_agent
+    app.state.context_cache = context_cache
     app.state.settings = settings
 
     yield

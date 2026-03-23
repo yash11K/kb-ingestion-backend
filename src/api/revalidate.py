@@ -50,6 +50,7 @@ async def revalidate_single_file(file_id: UUID, request: Request) -> FileDetail:
         content_hash=record["content_hash"],
         source_url=record["source_url"],
         component_type=record["component_type"],
+        source_id=record.get("source_id"),
         aem_node_id=record["aem_node_id"],
         md_content=record["md_content"],
         modify_date=record["modify_date"],
