@@ -1,0 +1,24 @@
+services:
+  app-dev:
+    build: .
+    profiles: ["dev"]
+    env_file: .env.dev
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_REGION
+    ports:
+      - "8000:8000"
+
+  app-preprod:
+    build: .
+    profiles: ["preprod"]
+    env_file: .env.preprod
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_REGION
+    ports:
+      - "8000:8000"

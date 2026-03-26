@@ -12,6 +12,7 @@ import logging
 import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import frontmatter
@@ -20,6 +21,7 @@ from strands.models.bedrock import BedrockModel
 
 from src.config import Settings
 from src.models.schemas import (
+    DeepLink,
     DiscoveredContent,
     ExtractionOutput,
     ExtractionResult,
@@ -86,7 +88,26 @@ For each content item (or group of related items), you must:
 
 1. Convert the content into clean, well-structured Markdown. Preserve headings, \
 lists, links, and tables. Strip unnecessary formatting.
-2. Refine the `title` if needed — make it descriptive and accurate.
+
+   CRITICAL — VERBATIM CONTENT RULE: You MUST preserve the original text \
+EXACTLY as provided, word for word. Do NOT rephrase, reword, paraphrase, \
+summarize, simplify, expand, or alter the source content in ANY way. Every \
+single word, phrase, and sentence from the raw content must appear in the \
+output UNCHANGED. You are a formatter, not a writer — your only job is to \
+apply Markdown structure (headings, lists, bold, links, tables) to the \
+original text. If even one word is changed, added, or removed from the \
+source content, the output is WRONG.
+
+   CRITICAL — LINK PRESERVATION RULE: You MUST preserve ALL hyperlinks found \
+in the content as proper Markdown links: [anchor text](url). This includes \
+"Learn More", "Click Here", "Read More", "Go to", "Visit", "See details", \
+and any other call-to-action or inline links. If the original content has a \
+link with text "Learn more" pointing to "/en/some-page", the output MUST \
+contain [Learn more](/en/some-page). Never strip links or convert them to \
+plain text. Links are critical content that must be preserved.
+
+2. Refine the `title` if needed — make it descriptive and accurate. The title \
+is the ONLY field where you may use your own wording.
 3. Infer the `content_type` (e.g. "FAQ", "Product Guide", "Support Article", \
 "Navigation", "General Content") based on the content structure and semantics.
 4. Decide how to group or split items into logical files. Related items that \
@@ -96,7 +117,8 @@ distinct topics should remain separate.
 Return a JSON array of objects with exactly these fields:
 - "title": (string) Descriptive title.
 - "content_type": (string) Inferred content type category.
-- "markdown_body": (string) The Markdown content. Must not be empty.
+- "markdown_body": (string) The Markdown content. Must not be empty. All links \
+must be preserved as [text](url) format.
 - "source_nodes": (array of strings) The path values of all content items \
 that contributed to this file.
 - "component_type": (string) The AEM component type of the primary source item.
@@ -104,12 +126,19 @@ that contributed to this file.
 - "parent_context": (string) Empty string unless you can infer a parent relationship.
 - "grouping_rationale": (string) Brief explanation of why these items were \
 grouped together or kept separate.
+- "embedded_links": (array of objects) ALL internal links found in the content. \
+Each object: {"url": "/path/to/page", "anchor_text": "Link text"}. Include \
+every "Learn More", "Click Here", "Read More", CTA link, and any other \
+internal link. Omit external links, anchors (#), mailto:, and tel: links.
 
 Important:
 - Process ALL content items provided in the prompt.
 - The source_url, region, brand, and namespace values are provided in the user prompt.
 - Return ONLY a valid JSON array of the result objects, with no additional text.
 - Do NOT call any tools. Perform all reasoning and conversion yourself.
+- NEVER change, rephrase, or paraphrase the original content text. The \
+markdown_body must contain the EXACT original words from the source. You are \
+converting format (HTML/text → Markdown), NOT rewriting content.
 """
 
 
@@ -299,7 +328,11 @@ class ExtractorAgent:
         files = PostProcessor.process(
             all_results, url, region, brand, namespace, parent_url,
         )
-        return ExtractionOutput(files=files, child_urls=[])
+
+        # Collect embedded links from extraction results and convert to DeepLinks
+        embedded_links = PostProcessor.collect_embedded_links(all_results, url)
+
+        return ExtractionOutput(files=files, child_urls=[], embedded_links=embedded_links)
 
 
 class PostProcessor:
@@ -363,3 +396,45 @@ class PostProcessor:
             ))
 
         return files
+
+    @staticmethod
+    def collect_embedded_links(
+        results: list[ExtractionResult],
+        source_url: str,
+    ) -> list[DeepLink]:
+        """Collect embedded links from extraction results into DeepLink objects."""
+        parsed = urlparse(source_url)
+        base_host = f"{parsed.scheme}://{parsed.netloc}"
+        seen: set[str] = set()
+        links: list[DeepLink] = []
+
+        for result in results:
+            for link in result.embedded_links:
+                url = link.url.strip()
+                if not url:
+                    continue
+
+                # Normalize to path
+                if url.startswith("http"):
+                    link_parsed = urlparse(url)
+                    if link_parsed.netloc and link_parsed.netloc != parsed.netloc:
+                        continue  # external
+                    url = link_parsed.path
+
+                if not url.startswith("/"):
+                    continue
+
+                clean_path = url.rstrip("/")
+                if clean_path in seen:
+                    continue
+                seen.add(clean_path)
+
+                links.append(DeepLink(
+                    url=clean_path,
+                    model_json_url=f"{base_host}{clean_path}.model.json",
+                    anchor_text=link.anchor_text,
+                    found_in_node=", ".join(result.source_nodes[:3]),
+                    found_in_page=source_url,
+                ))
+
+        return links

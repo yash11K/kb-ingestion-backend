@@ -16,8 +16,9 @@ import json
 import logging
 from typing import AsyncIterator
 
-import asyncpg
 import boto3
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import Settings
 
@@ -31,11 +32,11 @@ _SEARCH_SQL = """
 SELECT id, title, filename, content_type, component_type, doc_type,
        source_url, region, brand, md_content,
        ts_rank_cd(search_vector, query) AS rank
-FROM kb_files, plainto_tsquery('english', $1) query
+FROM kb_files, plainto_tsquery('english', :query) query
 WHERE search_vector @@ query
   AND status IN ('approved', 'in_s3')
 ORDER BY rank DESC
-LIMIT $2
+LIMIT :limit
 """
 
 # ---------------------------------------------------------------------------
@@ -55,8 +56,8 @@ def _sse(event: str, data: dict) -> str:
 class KBQueryService:
     """Query service supporting both local Postgres and Bedrock KB modes."""
 
-    def __init__(self, pool: asyncpg.Pool, settings: Settings) -> None:
-        self._pool = pool
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+        self._session_factory = session_factory
         self._settings = settings
         self._use_bedrock_kb = bool(settings.bedrock_kb_id)
 
@@ -191,7 +192,11 @@ class KBQueryService:
 
     async def _local_search(self, query: str, limit: int) -> AsyncIterator[str]:
         """Stream search results from local Postgres full-text search."""
-        rows = await self._pool.fetch(_SEARCH_SQL, query, limit)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(_SEARCH_SQL), {"query": query, "limit": limit}
+            )
+            rows = result.mappings().all()
 
         yield _sse("search_start", {"query": query, "total": len(rows)})
 
@@ -218,7 +223,11 @@ class KBQueryService:
 
     async def _local_chat(self, query: str, limit: int) -> AsyncIterator[str]:
         """Retrieve from Postgres then stream Bedrock converse_stream as SSE."""
-        rows = await self._pool.fetch(_SEARCH_SQL, query, limit)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(_SEARCH_SQL), {"query": query, "limit": limit}
+            )
+            rows = result.mappings().all()
 
         sources = []
         context_parts: list[str] = []

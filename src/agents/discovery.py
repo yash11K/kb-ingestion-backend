@@ -58,8 +58,11 @@ For each content component found, return:
 - `component_type`: the `:type` value
 - `title`: infer a descriptive title from the content
 - `content`: concatenate all meaningful text fields into clean text. Strip HTML \
-tags. Include headings, body text, descriptions. Do NOT include navigation labels \
-or CTA button text as the primary content.
+tags but PRESERVE EVERY SINGLE WORD of the original text EXACTLY as written. \
+Do NOT rephrase, reword, paraphrase, summarize, or alter the original content \
+in any way. The text must be a verbatim copy of the source material with only \
+HTML markup removed. Include headings, body text, descriptions. Do NOT include \
+navigation labels or CTA button text as the primary content.
 - `modify_date`: extract from `dataLayer` → `repo:modifyDate` if present in or \
 near the component, otherwise null
 

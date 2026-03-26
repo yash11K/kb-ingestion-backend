@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-import asyncpg
 from strands.tools import tool
 
 from src.db.queries import find_by_content_hash
 
-_db_pool: asyncpg.Pool | None = None
+_session_factory = None
 
 
-def set_db_pool(pool: asyncpg.Pool) -> None:
-    """Set the module-level database pool for use by the check_duplicate tool."""
-    global _db_pool
-    _db_pool = pool
+def set_session_factory(session_factory) -> None:
+    """Set the module-level session factory for use by the check_duplicate tool."""
+    global _session_factory
+    _session_factory = session_factory
 
 
 @tool
 async def check_duplicate(content_hash: str) -> dict:
     """Check if content_hash already exists in the kb_files table.
 
-    This is an async tool so it runs on the same event loop as the asyncpg
-    connection pool, avoiding cross-event-loop errors.
+    This is an async tool so it runs on the same event loop as the SQLAlchemy
+    async session, avoiding cross-event-loop errors.
 
     Args:
         content_hash: SHA-256 hex digest of the markdown body to check.

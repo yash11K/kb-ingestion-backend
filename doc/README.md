@@ -10,7 +10,8 @@ Technical documentation for the AEM KB Ingestion System, a Python-based pipeline
 | [Ingestion Pipeline](./ingestion-pipeline.md) | End-to-end pipeline flow: fetch → extract → validate → route → upload |
 | [AI Agents](./agents.md) | Extractor and Validator agent design, tools, and prompts |
 | [API Reference](./api-reference.md) | All REST endpoints with request/response schemas |
-| [Data Models](./data-models.md) | Database schema, Pydantic models, and status lifecycle |
+| [Data Models](./data-models.md) | Pydantic models, status lifecycle, and content hash logic |
+| [Database & DDL](./database.md) | Full DDL, ER diagram, ORM layer, Alembic migrations, and status enums |
 | [Configuration](./configuration.md) | Environment variables, thresholds, and component filtering |
 | [SSE Streaming](./sse-streaming.md) | Real-time pipeline event streaming specification |
 | [Infrastructure & Operations](./operations.md) | Deployment, diagnostics, reset scripts, and S3 key structure |

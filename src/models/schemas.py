@@ -79,6 +79,13 @@ class ExtractionOutput(BaseModel):
     """
     files: list["MarkdownFile"]
     child_urls: list[str] = Field(default_factory=list)
+    embedded_links: list["DeepLink"] = Field(default_factory=list)
+
+
+class EmbeddedLink(BaseModel):
+    """A link discovered within extracted content."""
+    url: str
+    anchor_text: str = ""
 
 
 class ExtractionResult(BaseModel):
@@ -90,6 +97,7 @@ class ExtractionResult(BaseModel):
     source_url: str
     parent_context: str
     grouping_rationale: str
+    embedded_links: list[EmbeddedLink] = Field(default_factory=list)
 
     @field_validator("markdown_body")
     @classmethod
@@ -207,6 +215,7 @@ class QueueItemSummary(BaseModel):
     title: str
     content_type: str
     component_type: str
+    source_id: UUID
     region: str
     brand: str
     validation_score: float | None
@@ -237,6 +246,7 @@ class FileSummary(BaseModel):
     title: str
     content_type: str
     status: FileStatus
+    source_id: UUID
     region: str
     brand: str
     validation_score: float | None
@@ -403,6 +413,26 @@ class DeepLinkConfirmRequest(BaseModel):
 
 class DeepLinkDismissRequest(BaseModel):
     link_ids: list[UUID] = Field(..., min_length=1)
+
+
+class SourceUrlStats(BaseModel):
+    """Stats for a single already-processed source URL."""
+    source_id: UUID
+    url: str
+    last_ingested_at: datetime | None
+    total_files: int
+    approved: int
+    pending_review: int
+    rejected: int
+
+
+class UrlLookupRequest(BaseModel):
+    urls: list[str] = Field(..., min_length=1)
+
+
+class UrlLookupResponse(BaseModel):
+    """Map of model_json_url -> stats for already-processed URLs."""
+    sources: dict[str, SourceUrlStats]
 
 
 class StatsResponse(BaseModel):

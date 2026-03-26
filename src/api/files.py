@@ -36,8 +36,6 @@ async def list_files(
     size: int = 20,
 ) -> PaginatedResponse[FileSummary]:
     """Return a paginated list of all files with optional filters."""
-    pool = request.app.state.db_pool
-
     filters: dict = {}
     if status is not None:
         filters["status"] = status
@@ -52,7 +50,9 @@ async def list_files(
     if source_id is not None:
         filters["source_id"] = source_id
 
-    rows, total = await list_kb_files(pool, filters, page, size)
+    async with request.app.state.session_factory() as session:
+        rows, total = await list_kb_files(session, filters, page, size)
+        await session.commit()
 
     items = [
         FileSummary(
@@ -61,6 +61,7 @@ async def list_files(
             title=r["title"],
             content_type=r["content_type"],
             status=FileStatus(r["status"]),
+            source_id=r["source_id"],
             region=r["region"],
             brand=r["brand"],
             validation_score=r.get("validation_score"),
@@ -83,9 +84,9 @@ async def list_files(
 @router.get("/files/{file_id}")
 async def get_file(file_id: UUID, request: Request) -> FileDetail:
     """Return the full detail for a file, or 404 if not found."""
-    pool = request.app.state.db_pool
-
-    record = await get_kb_file(pool, file_id)
+    async with request.app.state.session_factory() as session:
+        record = await get_kb_file(session, file_id)
+        await session.commit()
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
 

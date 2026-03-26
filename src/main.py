@@ -13,38 +13,55 @@ from src.agents.extractor import ExtractorAgent
 from src.agents.validator import ValidatorAgent
 from src.api.router import api_router
 from src.config import get_settings
-from src.db.connection import close_pool, create_pool
+from src.db.session import init_engine, create_session_factory
+import src.db.session as session_module
 from src.services.context_cache import ContextCache
 from src.services.pipeline import PipelineService
 from src.services.revalidation import RevalidationService
 from src.services.s3_upload import S3UploadService
 from src.services.kb_query import KBQueryService
 from src.services.stream_manager import StreamManager
-from src.tools.file_context import set_db_pool as set_context_db_pool
+from src.tools.file_context import set_session_factory as set_context_session_factory
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown resources."""
     settings = get_settings()
-    pool = await create_pool(settings.database_url)
+
+    # Validate DATABASE_URL format
+    if not settings.database_url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Please provide a valid PostgreSQL connection string "
+            "in the format: postgresql+asyncpg://user:password@host:port/dbname"
+        )
+    if not settings.database_url.startswith("postgresql+asyncpg://"):
+        raise RuntimeError(
+            f"DATABASE_URL must use the 'postgresql+asyncpg://' scheme for SQLAlchemy async. "
+            f"Got: {settings.database_url[:30]}..."
+        )
+
+    engine = init_engine(settings.database_url)
+    sf = create_session_factory(engine)
+    session_module.session_factory = sf
+
     s3_client = boto3.client("s3", region_name=settings.aws_region)
 
     s3_service = S3UploadService(s3_client, settings.s3_bucket_name)
     stream_manager = StreamManager()
     discovery = DiscoveryAgent(settings)
     extractor = ExtractorAgent(settings)
-    validator = ValidatorAgent(settings, pool)
+    validator = ValidatorAgent(settings, sf)
     pipeline_service = PipelineService(
-        discovery, extractor, validator, pool, s3_service, settings, stream_manager
+        discovery, extractor, validator, sf, s3_service, settings, stream_manager
     )
-    revalidation_service = RevalidationService(validator, pool, s3_service, settings)
-    kb_query_service = KBQueryService(pool, settings)
-    set_context_db_pool(pool)
+    revalidation_service = RevalidationService(validator, sf, s3_service, settings)
+    kb_query_service = KBQueryService(sf, settings)
+    set_context_session_factory(sf)
     context_agent = ContextAgent(settings)
     context_cache = ContextCache()
 
-    app.state.db_pool = pool
+    app.state.session_factory = sf
     app.state.s3_service = s3_service
     app.state.stream_manager = stream_manager
     app.state.pipeline_service = pipeline_service
@@ -56,7 +73,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await close_pool(pool)
+    await engine.dispose()
 
 
 def create_app() -> FastAPI:

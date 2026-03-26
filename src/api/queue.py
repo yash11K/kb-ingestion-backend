@@ -47,8 +47,6 @@ async def list_queue(
     size: int = 20,
 ) -> PaginatedResponse[QueueItemSummary]:
     """Return a paginated list of pending_review files with optional filters."""
-    pool = request.app.state.db_pool
-
     filters: dict[str, str] = {}
     if region is not None:
         filters["region"] = region
@@ -59,7 +57,9 @@ async def list_queue(
     if component_type is not None:
         filters["component_type"] = component_type
 
-    rows, total = await list_review_queue(pool, filters, page, size)
+    async with request.app.state.session_factory() as session:
+        rows, total = await list_review_queue(session, filters, page, size)
+        await session.commit()
 
     items = [
         QueueItemSummary(
@@ -68,6 +68,7 @@ async def list_queue(
             title=r["title"],
             content_type=r["content_type"],
             component_type=r["component_type"],
+            source_id=r["source_id"],
             region=r["region"],
             brand=r["brand"],
             validation_score=r["validation_score"],
@@ -90,9 +91,10 @@ async def list_queue(
 @router.get("/queue/{file_id}")
 async def get_queue_item(file_id: UUID, request: Request) -> QueueItemDetail:
     """Return the full detail for a pending_review file, or 404."""
-    pool = request.app.state.db_pool
+    async with request.app.state.session_factory() as session:
+        record = await get_kb_file(session, file_id)
+        await session.commit()
 
-    record = await get_kb_file(pool, file_id)
     if record is None or record["status"] != FileStatus.PENDING_REVIEW.value:
         raise HTTPException(status_code=404, detail="File not found in review queue")
 
@@ -123,25 +125,26 @@ async def accept_file(
     background_tasks: BackgroundTasks,
 ) -> QueueActionResponse:
     """Accept a pending_review file: set to approved and trigger S3 upload."""
-    pool = request.app.state.db_pool
+    async with request.app.state.session_factory() as session:
+        record = await get_kb_file(session, file_id)
+        if record is None or record["status"] != FileStatus.PENDING_REVIEW.value:
+            raise HTTPException(status_code=404, detail="File not found in review queue")
 
-    record = await get_kb_file(pool, file_id)
-    if record is None or record["status"] != FileStatus.PENDING_REVIEW.value:
-        raise HTTPException(status_code=404, detail="File not found in review queue")
-
-    now = datetime.now(timezone.utc)
-    await update_kb_file_status(
-        pool,
-        file_id,
-        FileStatus.APPROVED.value,
-        reviewed_by=body.reviewed_by,
-        reviewed_at=now,
-    )
+        now = datetime.now(timezone.utc)
+        await update_kb_file_status(
+            session,
+            file_id,
+            FileStatus.APPROVED.value,
+            reviewed_by=body.reviewed_by,
+            reviewed_at=now,
+        )
+        await session.commit()
 
     # Trigger S3 upload in background
     s3_service = request.app.state.s3_service
     pipeline_service = request.app.state.pipeline_service
-    background_tasks.add_task(_upload_accepted_file, pool, s3_service, file_id, record)
+    session_factory = request.app.state.session_factory
+    background_tasks.add_task(_upload_accepted_file, session_factory, s3_service, file_id, record)
 
     return QueueActionResponse(
         file_id=file_id,
@@ -157,21 +160,21 @@ async def reject_file(
     request: Request,
 ) -> QueueActionResponse:
     """Reject a pending_review file with review notes."""
-    pool = request.app.state.db_pool
+    async with request.app.state.session_factory() as session:
+        record = await get_kb_file(session, file_id)
+        if record is None or record["status"] != FileStatus.PENDING_REVIEW.value:
+            raise HTTPException(status_code=404, detail="File not found in review queue")
 
-    record = await get_kb_file(pool, file_id)
-    if record is None or record["status"] != FileStatus.PENDING_REVIEW.value:
-        raise HTTPException(status_code=404, detail="File not found in review queue")
-
-    now = datetime.now(timezone.utc)
-    await update_kb_file_status(
-        pool,
-        file_id,
-        FileStatus.REJECTED.value,
-        reviewed_by=body.reviewed_by,
-        reviewed_at=now,
-        review_notes=body.review_notes,
-    )
+        now = datetime.now(timezone.utc)
+        await update_kb_file_status(
+            session,
+            file_id,
+            FileStatus.REJECTED.value,
+            reviewed_by=body.reviewed_by,
+            reviewed_at=now,
+            review_notes=body.review_notes,
+        )
+        await session.commit()
 
     return QueueActionResponse(
         file_id=file_id,
@@ -187,24 +190,24 @@ async def update_file(
     request: Request,
 ) -> QueueActionResponse:
     """Update md_content, recompute content_hash, preserve current status."""
-    pool = request.app.state.db_pool
+    async with request.app.state.session_factory() as session:
+        record = await get_kb_file(session, file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="File not found")
 
-    record = await get_kb_file(pool, file_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="File not found")
+        # Extract body from the new md_content (strip frontmatter) and recompute hash
+        post = frontmatter.loads(body.md_content)
+        new_hash = compute_content_hash(post.content)
 
-    # Extract body from the new md_content (strip frontmatter) and recompute hash
-    post = frontmatter.loads(body.md_content)
-    new_hash = compute_content_hash(post.content)
-
-    current_status = record["status"]
-    await update_kb_file_status(
-        pool,
-        file_id,
-        current_status,
-        md_content=body.md_content,
-        content_hash=new_hash,
-    )
+        current_status = record["status"]
+        await update_kb_file_status(
+            session,
+            file_id,
+            current_status,
+            md_content=body.md_content,
+            content_hash=new_hash,
+        )
+        await session.commit()
 
     return QueueActionResponse(
         file_id=file_id,
@@ -214,7 +217,7 @@ async def update_file(
 
 
 async def _upload_accepted_file(
-    pool, s3_service, file_id: UUID, record: dict
+    session_factory, s3_service, file_id: UUID, record: dict
 ) -> None:
     """Background task: upload an accepted file to S3 and update status to in_s3."""
     from src.models.schemas import MarkdownFile
@@ -238,14 +241,16 @@ async def _upload_accepted_file(
         )
 
         result = await s3_service.upload(md_file, file_id)
-        await update_kb_file_status(
-            pool,
-            file_id,
-            status=FileStatus.IN_S3.value,
-            s3_bucket=result.s3_bucket,
-            s3_key=result.s3_key,
-            s3_uploaded_at=result.s3_uploaded_at,
-        )
+        async with session_factory() as session:
+            await update_kb_file_status(
+                session,
+                file_id,
+                status=FileStatus.IN_S3.value,
+                s3_bucket=result.s3_bucket,
+                s3_key=result.s3_key,
+                s3_uploaded_at=result.s3_uploaded_at,
+            )
+            await session.commit()
     except Exception:
         logger.error(
             "S3 upload failed for accepted file_id=%s; retaining approved status",

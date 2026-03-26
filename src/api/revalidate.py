@@ -80,10 +80,11 @@ async def start_batch_revalidation(
     request: Request,
 ) -> RevalidateResponse:
     """Accept a batch revalidation request and process in the background."""
-    db_pool = request.app.state.db_pool
     revalidation_service = request.app.state.revalidation_service
 
-    job_id = await insert_revalidation_job(db_pool, len(body.file_ids))
+    async with request.app.state.session_factory() as session:
+        job_id = await insert_revalidation_job(session, len(body.file_ids))
+        await session.commit()
 
     background_tasks.add_task(
         revalidation_service.revalidate_batch, job_id, body.file_ids
@@ -97,9 +98,10 @@ async def get_revalidation_job_status(
     job_id: UUID, request: Request
 ) -> RevalidationJobResponse:
     """Return the full revalidation job record, or 404 if not found."""
-    db_pool = request.app.state.db_pool
+    async with request.app.state.session_factory() as session:
+        job = await get_revalidation_job(session, job_id)
+        await session.commit()
 
-    job = await get_revalidation_job(db_pool, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Revalidation job not found")
 

@@ -68,28 +68,30 @@ async def get_nav_tree(
     force_refresh: bool = Query(default=False, description="Bypass cache"),
 ) -> NavTree:
     """Parse an AEM model.json into a navigation tree for source selection."""
-    db_pool = request.app.state.db_pool
     settings = request.app.state.settings
 
     # Check cache first
-    if not force_refresh:
-        cached = await get_nav_tree_cache(db_pool, url)
-        if cached is not None:
-            return NavTree(**cached)
+    async with request.app.state.session_factory() as session:
+        if not force_refresh:
+            cached = await get_nav_tree_cache(session, url)
+            if cached is not None:
+                await session.commit()
+                return NavTree(**cached)
 
-    # Fetch and parse
-    model_json = await _fetch_aem_json(url, settings.aem_request_timeout)
-    nav_tree = parse(model_json, url)
+        # Fetch and parse
+        model_json = await _fetch_aem_json(url, settings.aem_request_timeout)
+        nav_tree = parse(model_json, url)
 
-    # Cache for 24 hours
-    await upsert_nav_tree_cache(
-        db_pool,
-        root_url=url,
-        brand=nav_tree.brand,
-        region=nav_tree.region,
-        tree_data=nav_tree.model_dump(),
-        ttl_hours=24,
-    )
+        # Cache for 24 hours
+        await upsert_nav_tree_cache(
+            session,
+            root_url=url,
+            brand=nav_tree.brand,
+            region=nav_tree.region,
+            tree_data=nav_tree.model_dump(),
+            ttl_hours=24,
+        )
+        await session.commit()
 
     return nav_tree
 
@@ -102,8 +104,9 @@ async def get_all_deep_links(
     size: int = Query(default=50, ge=1, le=100),
 ) -> PaginatedResponse[DeepLinkResponse]:
     """List all deep links across all sources, with optional status filter and pagination."""
-    db_pool = request.app.state.db_pool
-    rows, total = await list_all_deep_links(db_pool, status=status, page=page, size=size)
+    async with request.app.state.session_factory() as session:
+        rows, total = await list_all_deep_links(session, status=status, page=page, size=size)
+        await session.commit()
     items = [DeepLinkResponse(**r) for r in rows]
     pages = max(1, -(-total // size))  # ceil division
     return PaginatedResponse(items=items, total=total, page=page, size=size, pages=pages)
@@ -116,8 +119,9 @@ async def get_deep_links(
     status: str = Query(default="pending", description="Filter by status"),
 ) -> list[DeepLinkResponse]:
     """Return deep links for a source, filtered by status."""
-    db_pool = request.app.state.db_pool
-    rows = await list_deep_links(db_pool, source_id, status)
+    async with request.app.state.session_factory() as session:
+        rows = await list_deep_links(session, source_id, status)
+        await session.commit()
     return [DeepLinkResponse(**r) for r in rows]
 
 
@@ -129,16 +133,17 @@ async def confirm_deep_links(
     request: Request,
 ) -> BatchIngestResponse:
     """Confirm selected deep links and start one ingestion job per link."""
-    db_pool = request.app.state.db_pool
     pipeline_service = request.app.state.pipeline_service
 
-    # Mark as confirmed
-    await bulk_update_deep_link_status(db_pool, body.link_ids, "confirmed")
+    async with request.app.state.session_factory() as session:
+        # Mark as confirmed
+        await bulk_update_deep_link_status(session, body.link_ids, "confirmed")
 
-    # Create one job per deep link
-    job_url_pairs = await insert_deep_link_ingestion_jobs(
-        db_pool, source_id, body.link_ids,
-    )
+        # Create one job per deep link
+        job_url_pairs = await insert_deep_link_ingestion_jobs(
+            session, source_id, body.link_ids,
+        )
+        await session.commit()
 
     # Launch a separate pipeline per job
     jobs: list[BatchIngestItem] = []
@@ -158,6 +163,7 @@ async def dismiss_deep_links(
     request: Request,
 ) -> dict:
     """Dismiss selected deep links."""
-    db_pool = request.app.state.db_pool
-    await bulk_update_deep_link_status(db_pool, body.link_ids, "dismissed")
+    async with request.app.state.session_factory() as session:
+        await bulk_update_deep_link_status(session, body.link_ids, "dismissed")
+        await session.commit()
     return {"dismissed": len(body.link_ids)}

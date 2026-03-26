@@ -15,9 +15,10 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import UUID
 
-import asyncpg
 import httpx
 import frontmatter as fm_lib
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.agents.discovery import DiscoveryAgent
 from src.agents.extractor import ExtractorAgent
@@ -49,7 +50,7 @@ class PipelineService:
         discovery: DiscoveryAgent,
         extractor: ExtractorAgent,
         validator: ValidatorAgent,
-        db_pool: asyncpg.Pool,
+        session_factory: async_sessionmaker[AsyncSession],
         s3_service: S3UploadService,
         settings: Settings,
         stream_manager: StreamManager,
@@ -57,7 +58,7 @@ class PipelineService:
         self.discovery = discovery
         self.extractor = extractor
         self.validator = validator
-        self.db_pool = db_pool
+        self.session_factory = session_factory
         self.s3_service = s3_service
         self.settings = settings
         self.stream_manager = stream_manager
@@ -88,12 +89,14 @@ class PipelineService:
                     logger.error(
                         "Pipeline failed for job_id=%s: %s", job_id, exc, exc_info=True
                     )
-                    await update_ingestion_job(
-                        self.db_pool, job_id,
-                        status="failed",
-                        error_message=str(exc),
-                        completed_at=datetime.now(timezone.utc),
-                    )
+                    async with self.session_factory() as session:
+                        await update_ingestion_job(
+                            session, job_id,
+                            status="failed",
+                            error_message=str(exc),
+                            completed_at=datetime.now(timezone.utc),
+                        )
+                        await session.commit()
                     self.stream_manager.publish(job_id, "error", {
                         "message": str(exc),
                     })
@@ -168,17 +171,19 @@ class PipelineService:
                 ),
             })
 
-        await update_ingestion_job(
-            self.db_pool, job_id,
-            status="completed",
-            files_created=total_files_created,
-            files_auto_approved=total_files_auto_approved,
-            files_pending_review=total_files_pending_review,
-            files_auto_rejected=total_files_auto_rejected,
-            duplicates_skipped=total_duplicates_skipped,
-            pages_crawled=pages_processed,
-            completed_at=datetime.now(timezone.utc),
-        )
+        async with self.session_factory() as session:
+            await update_ingestion_job(
+                session, job_id,
+                status="completed",
+                files_created=total_files_created,
+                files_auto_approved=total_files_auto_approved,
+                files_pending_review=total_files_pending_review,
+                files_auto_rejected=total_files_auto_rejected,
+                duplicates_skipped=total_duplicates_skipped,
+                pages_crawled=pages_processed,
+                completed_at=datetime.now(timezone.utc),
+            )
+            await session.commit()
 
         logger.info(
             "Pipeline completed for job_id=%s: pages=%d, created=%d, approved=%d, "
@@ -268,7 +273,9 @@ class PipelineService:
                         }
                         for dl in discovery.deep_links
                     ]
-                    await insert_deep_links(self.db_pool, link_dicts)
+                    async with self.session_factory() as session:
+                        await insert_deep_links(session, link_dicts)
+                        await session.commit()
                     deep_links_count = len(discovery.deep_links)
                     logger.info(
                         "Stored %d deep links from %s",
@@ -308,6 +315,32 @@ class PipelineService:
                 "total_nodes": total_nodes,
             })
 
+            # 4b. Store embedded links from extractor (complements discovery links)
+            if extraction.embedded_links and source_id:
+                try:
+                    ext_link_dicts = [
+                        {
+                            "source_id": source_id,
+                            "job_id": job_id,
+                            "url": dl.url,
+                            "model_json_url": dl.model_json_url,
+                            "anchor_text": dl.anchor_text,
+                            "found_in_node": dl.found_in_node,
+                            "found_in_page": dl.found_in_page,
+                        }
+                        for dl in extraction.embedded_links
+                    ]
+                    async with self.session_factory() as session:
+                        await insert_deep_links(session, ext_link_dicts)
+                        await session.commit()
+                    deep_links_count += len(extraction.embedded_links)
+                    logger.info(
+                        "Stored %d embedded links from extractor for %s",
+                        len(extraction.embedded_links), url,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to store extractor embedded links: %s", exc)
+
             # 5. Per file: insert → validate → route → upload
             for idx, md_file in enumerate(md_files, 1):
                 sm.publish(job_id, "progress", {
@@ -317,7 +350,9 @@ class PipelineService:
                     "total": total_nodes,
                 })
 
-                file_id = await self._insert_file(md_file, source_id, job_id)
+                async with self.session_factory() as session:
+                    file_id = await self._insert_file(session, md_file, source_id, job_id)
+                    await session.commit()
                 counters["files_created"] += 1
 
                 try:
@@ -329,16 +364,21 @@ class PipelineService:
                     })
                     validation = await self.validator.validate(md_file, job_id, sm)
 
-                    status = self._route_by_score(validation.score)
-
-                    await update_kb_file_status(
-                        self.db_pool, file_id,
-                        status=status.value,
-                        validation_score=validation.score,
-                        validation_breakdown=validation.breakdown.model_dump(),
-                        validation_issues=validation.issues,
-                        doc_type=validation.doc_type,
+                    status = self._route_by_score(
+                        validation.score,
+                        validation.breakdown.semantic_quality,
                     )
+
+                    async with self.session_factory() as session:
+                        await update_kb_file_status(
+                            session, file_id,
+                            status=status.value,
+                            validation_score=validation.score,
+                            validation_breakdown=validation.breakdown.model_dump(),
+                            validation_issues=validation.issues,
+                            doc_type=validation.doc_type,
+                        )
+                        await session.commit()
 
                     if status == FileStatus.APPROVED:
                         counters["files_auto_approved"] += 1
@@ -383,6 +423,7 @@ class PipelineService:
 
     async def _insert_file(
         self,
+        session: AsyncSession,
         md_file: MarkdownFile,
         source_id: UUID | None = None,
         job_id: UUID | None = None,
@@ -408,11 +449,16 @@ class PipelineService:
             "source_id": source_id,
             "job_id": job_id,
         }
-        return await insert_kb_file(self.db_pool, file_dict)
+        return await insert_kb_file(session, file_dict)
 
-    def _route_by_score(self, score: float) -> FileStatus:
-        """Determine file status based on validation score thresholds."""
-        if score >= self.settings.auto_approve_threshold:
+    def _route_by_score(self, score: float, semantic_quality: float = 1.0) -> FileStatus:
+        """Determine file status based on validation score and semantic quality.
+
+        Auto-approval requires both the total score threshold AND semantic
+        quality >= 90% of its max (0.45 out of 0.5).
+        """
+        min_semantic = 0.4  # 80% of 0.5 max
+        if score >= self.settings.auto_approve_threshold and semantic_quality >= min_semantic:
             return FileStatus.APPROVED
         elif score >= self.settings.auto_reject_threshold:
             return FileStatus.PENDING_REVIEW
@@ -425,13 +471,15 @@ class PipelineService:
         """Upload an approved file to S3 and update its DB status."""
         try:
             result = await self.s3_service.upload(md_file, file_id)
-            await update_kb_file_status(
-                self.db_pool, file_id,
-                status=FileStatus.IN_S3.value,
-                s3_bucket=result.s3_bucket,
-                s3_key=result.s3_key,
-                s3_uploaded_at=result.s3_uploaded_at,
-            )
+            async with self.session_factory() as session:
+                await update_kb_file_status(
+                    session, file_id,
+                    status=FileStatus.IN_S3.value,
+                    s3_bucket=result.s3_bucket,
+                    s3_key=result.s3_key,
+                    s3_uploaded_at=result.s3_uploaded_at,
+                )
+                await session.commit()
         except Exception:
             logger.error(
                 "S3 upload failed for file_id=%s; retaining approved status",

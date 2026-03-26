@@ -12,13 +12,13 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-import asyncpg
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from strands import Agent
 from strands.models.bedrock import BedrockModel
 
 from src.config import Settings
 from src.models.schemas import MarkdownFile, ValidationBreakdown, ValidationResult
-from src.tools.duplicate_checker import check_duplicate, set_db_pool
+from src.tools.duplicate_checker import check_duplicate, set_session_factory
 
 if TYPE_CHECKING:
     from src.services.stream_manager import StreamManager
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 VALIDATOR_SYSTEM_PROMPT = """\
 You are a content validation agent. Your job is to score a Markdown file \
 on three dimensions: metadata completeness, semantic quality, and uniqueness. \
-You must also classify the document type based on its content.
+You must also classify the document type and ALWAYS provide an assessment comment.
 
 Follow these steps exactly:
 
@@ -42,10 +42,14 @@ source_url, component_type, key, namespace, region, brand.
 fields, each field is worth 0.0375.
 
 3. Score semantic_quality from 0.0 to 0.5:
-   - 0.5 for well-structured, coherent, readable content with clear meaning.
-   - 0.3-0.4 for adequate content with minor issues.
-   - 0.1-0.2 for poor quality, incoherent, or very short content.
+   - 0.5 for well-structured, coherent, readable content with clear meaning \
+and sufficient depth.
+   - 0.3-0.4 for adequate content with minor issues or moderate depth.
+   - 0.1-0.2 for poor quality, incoherent, very short, or thin content \
+(e.g. just a title and one line, banner text, placeholder content).
    - 0.0 for empty or meaningless content.
+   Be strict: a file with only a heading and a single short sentence is NOT \
+high quality content. It should score 0.2 or below for semantic quality.
 
 4. Use the check_duplicate tool with the content_hash to check for duplicates.
    - Score uniqueness as 0.2 if the content is NOT a duplicate.
@@ -53,7 +57,19 @@ fields, each field is worth 0.0375.
 
 5. Compute the total score as: metadata_completeness + semantic_quality + uniqueness.
 
-6. Collect any issues found into a list of short descriptive strings.
+6. ALWAYS provide an assessment in the "issues" list. This is MANDATORY even \
+for high-scoring files. The first entry must be a brief overall assessment \
+of the content (1-2 sentences describing what the content is and your quality \
+judgment). Additional entries should describe specific problems found. \
+Examples:
+   - For a good file: ["Well-structured FAQ covering password reset with clear \
+step-by-step instructions. No issues found."]
+   - For a thin file: ["Thin content — only a title banner with a single \
+instruction line. Insufficient depth for a standalone knowledge base article.", \
+"Content body is too short to be useful"]
+   - For a file with issues: ["Product guide covering rental add-ons with \
+adequate detail but some formatting problems.", "Missing heading hierarchy", \
+"Some HTML artifacts remain in the body"]
 
 7. Classify the document type based on the actual content semantics:
    - "TnC" for terms and conditions, legal agreements, policies
@@ -71,7 +87,7 @@ fields, each field is worth 0.0375.
     "semantic_quality": <float 0.0-0.5>,
     "uniqueness": <float 0.0-0.2>
   },
-  "issues": ["issue1", "issue2", ...],
+  "issues": ["<overall assessment — ALWAYS required>", "<specific issue 1>", ...],
   "doc_type": "<one of: TnC, FAQ, ProductGuide, Support, Marketing, General>"
 }
 
@@ -87,7 +103,7 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
 class ValidatorAgent:
     """Wraps the Strands Agent with validation tools (Haiku-based)."""
 
-    def __init__(self, settings: Settings, db_pool: asyncpg.Pool) -> None:
+    def __init__(self, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._model_kwargs = dict(
             model_id=settings.haiku_model_id,
             region_name=settings.aws_region,
@@ -95,7 +111,7 @@ class ValidatorAgent:
         )
         self._tools = [check_duplicate]
         self.settings = settings
-        set_db_pool(db_pool)
+        set_session_factory(session_factory)
 
     async def validate(
         self,
@@ -197,6 +213,9 @@ class ValidatorAgent:
         if not isinstance(issues, list):
             issues = []
         issues = [str(i) for i in issues]
+        # Ensure at least one assessment entry is always present
+        if not issues:
+            issues = ["No assessment provided by validator agent."]
 
         valid_doc_types = {"TnC", "FAQ", "ProductGuide", "Support", "Marketing", "General"}
         doc_type = data.get("doc_type", "General")

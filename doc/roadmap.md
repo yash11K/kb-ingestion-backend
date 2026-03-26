@@ -2,69 +2,56 @@
 
 ## Current State
 
-Today, the ingestion pipeline requires explicit human input for each job:
+Today, the ingestion pipeline accepts a list of AEM `model.json` URLs. Region and brand are auto-inferred from URL patterns. A three-agent architecture handles the downstream processing:
+
+1. **Discovery Agent** (Haiku) — fast content discovery + deep link detection
+2. **Extractor Agent** (Sonnet) — Markdown generation with frontmatter
+3. **Validator Agent** (Sonnet) — quality scoring + document classification
 
 ```json
 POST /ingest
 {
-  "url": "https://aem-instance/content/page.model.json",
-  "region": "US",
-  "brand": "BrandName"
+  "urls": ["https://www.avis.com/en/customer-service/faqs.model.json"],
+  "nav_root_url": "https://www.avis.com/en.model.json"
 }
+// Region and brand auto-inferred from URL
 ```
-
-The caller must know the exact AEM URL, the region, and the brand. The system then handles everything downstream (extraction, validation, routing, upload) autonomously. This is a solid foundation, but the input side is still manual.
 
 ## Vision
 
 The system will progressively become more agentic, reducing human input at each phase until the pipeline can autonomously discover, ingest, and maintain AEM content with minimal oversight.
 
-## Phase 1: Current — Explicit Input (Implemented)
+## Phase 1: Explicit Input (Implemented ✓)
 
-- Human provides `url`, `region`, `brand`
-- Optional `component_types` override for per-job allowlist customization
-- Pipeline handles extraction → validation → routing → upload
+- Human provides list of `model.json` URLs
+- Optional nav context for source enrichment
+- Pipeline handles discovery → extraction → validation → routing → upload
 - Human review queue for mid-score content
 
-## Phase 2: Smart Metadata Detection
+## Phase 2: Smart Metadata Detection (Implemented ✓)
 
-**Goal**: Reduce required input to just the URL.
+Region and brand are now auto-detected from URL patterns:
+- `/en-us/` → region `nam`, brand inferred from domain
+- `/en-gb/` → region `emea`
+- Locale-to-region mapping is configurable via `LOCALE_REGION_MAP`
+- Namespace inference from URL path segments (e.g. `/customer-service/` → namespace `customer-service`)
 
-The agent would:
-- Auto-detect `region` from URL patterns (e.g., `/en-us/` → US, `/en-gb/` → UK) or from AEM page metadata
-- Auto-detect `brand` from the domain or AEM content structure (e.g., `avis.com` → Avis, `budget.com` → Budget)
-- Infer `content_type` from the page structure and component types found
-- Fall back to asking the user only when detection confidence is low
+Input simplified to just URLs — no manual region/brand required.
 
-**Input simplification:**
-```json
-POST /ingest
-{
-  "url": "https://www.avis.com/en/customer-service/faqs/usa/car-assignment.model.json"
-}
-// Agent infers: region=US, brand=Avis
-```
+## Phase 3: URL Discovery via Deep Links (Partially Implemented)
 
-## Phase 3: URL Discovery via Sitemap Crawling
+The Discovery Agent (Haiku) already identifies embedded deep links within AEM content. These are stored in the `deep_links` table and surfaced via the API for user confirmation.
 
-**Goal**: The agent discovers ingestible URLs automatically.
+Current capabilities:
+- Deep links discovered automatically during ingestion
+- User can confirm/dismiss discovered links via API
+- Confirmed links trigger individual ingestion jobs
+- URL denylist patterns filter out non-content URLs (login, checkout, etc.)
 
-The agent would:
-- Accept a root domain or sitemap URL instead of individual page URLs
-- Crawl AEM sitemaps to discover all `model.json` endpoints
-- Filter URLs by relevance (FAQ pages, support pages, product pages)
-- Queue discovered URLs for batch ingestion
-- Track which URLs have been ingested and detect new/changed pages
-
-**Input simplification:**
-```json
-POST /ingest
-{
-  "domain": "www.avis.com",
-  "scope": "customer-service"
-}
-// Agent discovers and ingests all relevant pages
-```
+**Remaining work:**
+- Sitemap crawling for broader URL discovery
+- Automatic relevance scoring for discovered URLs
+- Scheduled discovery passes for new content detection
 
 ## Phase 4: Change Detection and Proactive Re-Ingestion
 
@@ -113,3 +100,4 @@ These improvements support the agentic evolution:
 - Pipeline execution metrics (duration, token usage, success rates)
 - Content quality trends over time
 - Agent performance dashboards
+

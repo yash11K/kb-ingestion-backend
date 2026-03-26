@@ -2,24 +2,39 @@
 
 import asyncio
 import boto3
-import asyncpg
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
 from src.config import get_settings
 
 
 async def reset_db(database_url: str) -> None:
-    conn = await asyncpg.connect(database_url, ssl="require")
+    engine = create_async_engine(
+        database_url,
+        connect_args={"ssl": "require", "statement_cache_size": 0},
+        echo=False,
+    )
     try:
-        for table in ("kb_files", "ingestion_jobs", "revalidation_jobs"):
-            exists = await conn.fetchval(
-                "SELECT to_regclass($1) IS NOT NULL", f"public.{table}"
-            )
-            if exists:
-                await conn.execute(f"TRUNCATE {table} CASCADE")
-                print(f"DB: truncated {table}")
-            else:
-                print(f"DB: {table} does not exist, skipping")
+        async with engine.begin() as conn:
+            for table in (
+                "kb_files",
+                "ingestion_jobs",
+                "revalidation_jobs",
+                "sources",
+                "nav_tree_cache",
+                "deep_links",
+            ):
+                result = await conn.execute(
+                    text("SELECT to_regclass(:tbl) IS NOT NULL"),
+                    {"tbl": f"public.{table}"},
+                )
+                exists = result.scalar()
+                if exists:
+                    await conn.execute(text(f"TRUNCATE {table} CASCADE"))
+                    print(f"DB: truncated {table}")
+                else:
+                    print(f"DB: {table} does not exist, skipping")
     finally:
-        await conn.close()
+        await engine.dispose()
 
 
 def reset_s3(bucket_name: str, region: str) -> None:

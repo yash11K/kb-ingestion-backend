@@ -38,13 +38,13 @@ class ContextChatRequest(BaseModel):
 
 
 async def _build_cache_key(
-    pool, file_id: UUID, cache
+    session, file_id: UUID, cache
 ) -> tuple[str | None, dict | None, list[dict]]:
     """Fetch current file state and compute a cache key.
 
     Returns (cache_key, file_record, deep_links).
     """
-    record = await get_kb_file(pool, file_id)
+    record = await get_kb_file(session, file_id)
     if record is None:
         return None, None, []
 
@@ -52,7 +52,7 @@ async def _build_cache_key(
     source_id = record.get("source_id")
     if source_id:
         for status in ("pending", "confirmed"):
-            deep_links.extend(await list_deep_links(pool, source_id, status))
+            deep_links.extend(await list_deep_links(session, source_id, status))
 
     key = cache.make_key(
         file_id=str(file_id),
@@ -98,14 +98,15 @@ async def context_chat(body: ContextChatRequest, request: Request) -> StreamingR
     """Stream Context Agent analysis or follow-up response as SSE."""
     agent = request.app.state.context_agent
     cache = request.app.state.context_cache
-    pool = request.app.state.db_pool
 
     # For initial analysis (empty conversation), check cache first
     cache_key = None
     if not body.conversation:
-        cache_key, record, deep_links = await _build_cache_key(
-            pool, body.file_id, cache
-        )
+        async with request.app.state.session_factory() as session:
+            cache_key, record, deep_links = await _build_cache_key(
+                session, body.file_id, cache
+            )
+            await session.commit()
         if cache_key:
             cached = cache.get(cache_key)
             if cached:

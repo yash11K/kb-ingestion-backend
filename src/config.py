@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
 
     # Database
-    database_url: str  # NeonDB connection string
+    database_url: str  # SQLAlchemy async connection string (postgresql+asyncpg://...)
 
     # AWS
     aws_region: str = "us-east-1"
@@ -102,6 +102,16 @@ class Settings(BaseSettings):
         "en-au": "apac",
         "en-nz": "apac",
     }
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, v: str) -> str:
+        if not v.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                f"DATABASE_URL must use the SQLAlchemy asyncpg dialect "
+                f"(expected 'postgresql+asyncpg://...', got '{v[:30]}...')"
+            )
+        return v
+
     @field_validator("batch_threshold")
     @classmethod
     def batch_threshold_min(cls, v: int) -> int:

@@ -10,6 +10,8 @@ venv/
 
 # Environment
 .env
+.env.dev
+.env.preprod
 
 # Hypothesis test database
 .hypothesis/

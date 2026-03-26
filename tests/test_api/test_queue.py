@@ -14,11 +14,17 @@ from src.api.queue import router
 from src.models.schemas import FileStatus
 
 
-def _create_app(db_pool=None, s3_service=None, pipeline_service=None) -> FastAPI:
+def _create_app(session_factory=None, s3_service=None, pipeline_service=None) -> FastAPI:
     """Build a minimal FastAPI app with the queue router and mocked state."""
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
-    app.state.db_pool = db_pool or AsyncMock()
+    if session_factory is None:
+        # Create a mock session_factory that returns an async context manager
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        session_factory = MagicMock(return_value=mock_session)
+    app.state.session_factory = session_factory
     app.state.s3_service = s3_service or MagicMock()
     app.state.pipeline_service = pipeline_service or MagicMock()
     return app

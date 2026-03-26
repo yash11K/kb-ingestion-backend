@@ -12,25 +12,35 @@ uvicorn src.main:create_app --factory --reload --port 8000
 
 The app is available at `http://localhost:8000`. API docs at `/docs` (Swagger) and `/redoc`.
 
-## Database Setup
+## Docker
 
-The system uses NeonDB (serverless PostgreSQL). Run migrations in order:
+Run the application via Docker Compose using environment-specific profiles:
 
 ```bash
-# Connect to your NeonDB instance and run:
-psql $DATABASE_URL -f src/db/migrations/001_initial.sql
-psql $DATABASE_URL -f src/db/migrations/002_revalidation_jobs.sql
-psql $DATABASE_URL -f src/db/migrations/003_add_doc_type.sql
+# Development
+docker compose --profile dev up
+
+# Pre-production
+docker compose --profile preprod up
 ```
 
-Migration `001_initial.sql` creates:
-- `kb_files` table with all columns and indexes
-- `ingestion_jobs` table with indexes
-- `uuid-ossp` extension for UUID generation
+The `dev` profile loads `.env.dev` and the `preprod` profile loads `.env.preprod`. AWS credentials are forwarded from the host environment. See `.env.example` for the full list of variables.
 
-Migration `002_revalidation_jobs.sql` adds the `revalidation_jobs` table.
+## Database Setup
 
-Migration `003_add_doc_type.sql` adds the `doc_type` column to `kb_files`.
+The system uses PostgreSQL (Neon serverless today, Aurora PostgreSQL in the future) with SQLAlchemy 2.0 async ORM. Schema migrations are managed by Alembic.
+
+```bash
+# New database — apply all migrations:
+alembic upgrade head
+
+# Existing database that already has the schema — stamp without applying:
+alembic stamp head
+```
+
+The baseline migration (`alembic/versions/001_baseline.py`) creates all 6 tables (`sources`, `ingestion_jobs`, `kb_files`, `revalidation_jobs`, `nav_tree_cache`, `deep_links`), indexes, the `uuid-ossp` extension, and the `search_vector` trigger. Future schema changes are added as new Alembic revisions.
+
+See [Database & DDL](./database.md) for the full schema reference, migration chain, and ORM details.
 
 ## Infrastructure Diagnostics
 
@@ -60,7 +70,7 @@ This script performs:
 python reset_all.py
 ```
 
-This is useful for development/testing. It truncates `kb_files`, `ingestion_jobs`, and `revalidation_jobs`, then deletes all objects from the configured S3 bucket.
+This is useful for development/testing. It uses SQLAlchemy to truncate all 6 tables (`kb_files`, `ingestion_jobs`, `revalidation_jobs`, `sources`, `nav_tree_cache`, `deep_links`), then deletes all objects from the configured S3 bucket.
 
 ## S3 Key Structure
 
@@ -85,13 +95,13 @@ The FastAPI app uses a lifespan context manager (`src/main.py`) that:
 
 **On startup:**
 1. Loads settings from environment
-2. Creates asyncpg connection pool (SSL required)
+2. Creates SQLAlchemy `AsyncEngine` and `async_sessionmaker` (SSL required, `statement_cache_size=0`)
 3. Creates boto3 S3 client
-4. Instantiates all services (S3Upload, StreamManager, ExtractorAgent, ValidatorAgent, PipelineService, RevalidationService)
+4. Instantiates all services (S3Upload, StreamManager, DiscoveryAgent, ExtractorAgent, ValidatorAgent, PipelineService, RevalidationService, KBQueryService, ContextAgent, ContextCache)
 5. Attaches everything to `app.state`
 
 **On shutdown:**
-1. Closes the asyncpg connection pool
+1. Disposes the SQLAlchemy engine (releases all connections)
 
 ## CORS
 
@@ -120,7 +130,9 @@ Key log points:
 | fastapi | ≥ 0.110 | Web framework |
 | uvicorn | ≥ 0.29 | ASGI server |
 | httpx | ≥ 0.27 | Async HTTP client |
-| asyncpg | ≥ 0.29 | PostgreSQL driver |
+| sqlalchemy[asyncio] | ≥ 2.0 | Async ORM and database toolkit |
+| alembic | ≥ 1.13 | Schema migration management |
+| asyncpg | ≥ 0.29 | PostgreSQL async driver (used by SQLAlchemy) |
 | boto3 | ≥ 1.34 | AWS SDK |
 | strands-agents | ≥ 0.1 | AI agent framework |
 | pydantic-settings | ≥ 2.2 | Config management |

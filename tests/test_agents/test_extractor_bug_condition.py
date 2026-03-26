@@ -97,7 +97,7 @@ def large_aem_payloads(draw):
 def _make_test_settings() -> Settings:
     """Create a Settings instance for testing without requiring .env file."""
     return Settings(
-        database_url="postgresql://test:test@localhost:5432/testdb",
+        database_url="postgresql+asyncpg://test:test@localhost:5432/testdb",
         aws_region="us-east-1",
         s3_bucket_name="test-bucket",
         bedrock_model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",

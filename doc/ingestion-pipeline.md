@@ -67,46 +67,49 @@ Client                  API              Pipeline           Extractor         Va
 
 ### Step 1: API Request
 
-The client sends `POST /api/v1/ingest` with:
+The client sends `POST /api/v1/ingest` with one or more URLs:
 ```json
 {
-  "url": "https://aem-instance/content/page.model.json",
-  "region": "US",
-  "brand": "BrandName"
+  "urls": [
+    "https://aem-instance/content/page-a.model.json",
+    "https://aem-instance/content/page-b.model.json"
+  ],
+  "nav_root_url": "https://aem-instance/content/home.model.json",
+  "nav_metadata": {
+    "https://aem-instance/content/page-a.model.json": {
+      "label": "Page A",
+      "section": "Main Nav",
+      "page_path": "/content/page-a"
+    }
+  }
 }
 ```
 
-The API creates an `ingestion_jobs` record (status: `in_progress`) and launches the pipeline as a `BackgroundTask`. The client receives a 202 with the `job_id` immediately.
+Region and brand are auto-inferred from each URL. The API creates a source and ingestion job per URL, then launches the pipeline as a `BackgroundTask`. The client receives a 202 with the job list immediately.
 
 ### Step 2: Fetch AEM JSON
 
-The `ExtractorAgent.extract()` method fetches the AEM JSON directly via `httpx.get()` (not through the LLM). This is a deliberate design choice — the HTTP fetch is deterministic and doesn't need AI reasoning.
+The pipeline fetches the AEM JSON directly via `httpx.get()` (not through the LLM). This is a deliberate design choice — the HTTP fetch is deterministic and doesn't need AI reasoning.
 
 The raw payload size is logged. If it exceeds `MAX_PAYLOAD_BYTES` (default 500KB), a warning is emitted.
 
-### Step 3: Pre-Filter Content Nodes
+### Step 3: Discovery (Haiku Agent)
 
-The `filter_by_component_type_direct()` function runs as a plain Python call (not an LLM tool) to avoid sending the full JSON through the agent's context window. It:
+The raw AEM JSON is sent to the Discovery Agent (Claude Haiku) which:
 
-1. Recursively traverses all `:items` objects in the AEM JSON
-2. For each node with a `:type` field:
-   - Checks against the **denylist** first (denylist takes precedence)
-   - If not denied, checks against the **allowlist**
-   - Matching nodes become `ContentNode` objects
-3. Always recurses into nested `:items` regardless of match/deny
+1. Identifies content items (path, component type, title, cleaned text)
+2. Discovers embedded deep links (internal AEM URLs found in content)
+3. Returns a `DiscoveryResult` with both content items and deep links
 
-The glob-style matching strips the `*/` prefix and uses `endswith()`:
-- Pattern `*/text` matches `core/components/text`
-- Pattern `*/accordionitem` matches `avis/components/content/accordionitem`
+This is significantly cheaper and faster than sending the full JSON to Sonnet. The `HAIKU_MAX_INPUT_TOKENS` setting controls the maximum payload size. If `ENABLE_HAIKU_DISCOVERY` is false, the system falls back to deterministic component filtering.
 
-### Step 4: Agent Extraction
+### Step 4: Agent Extraction (Sonnet)
 
-The filtered `ContentNode` list is serialized to JSON and passed to the Strands Extractor Agent. The agent uses two tools:
+The discovered `DiscoveredContent` items are passed to the Strands Extractor Agent (Claude Sonnet). If the item count exceeds `BATCH_THRESHOLD` (default 8), they're split into sequential batches.
 
-1. **`html_to_markdown`**: Converts each node's HTML content to clean Markdown using `markdownify`, then strips any residual HTML tags
-2. **`generate_md_file`**: Creates a complete Markdown file with YAML frontmatter containing all metadata fields, computes the SHA-256 content hash, and generates a slug-based filename
+The agent uses the `generate_md_file` tool to create complete Markdown files with YAML frontmatter, compute SHA-256 content hashes, and generate slug-based filenames.
 
-The agent returns a list of `MarkdownFile` objects.
+The agent returns an `ExtractionOutput` containing `MarkdownFile` objects and any additional `child_urls` discovered during extraction.
 
 ### Step 5: Duplicate Detection
 
@@ -184,15 +187,14 @@ See [SSE Streaming](./sse-streaming.md) for the full event specification.
 
 ## Current Input Model
 
-Today, the ingestion endpoint requires explicit `url`, `region`, and `brand` parameters from the caller. The system also supports an optional `component_types` override to customize the allowlist per-request.
+The ingestion endpoint accepts a list of AEM `model.json` URLs. Region and brand are auto-inferred from URL patterns. Optional `nav_root_url` and `nav_metadata` provide navigation context for source enrichment.
 
 ### Toward Agentic Automation
 
-The current manual input model is a stepping stone. The roadmap envisions progressively more autonomous behavior:
+The current input model is a stepping stone. The roadmap envisions progressively more autonomous behavior:
 
-1. **Phase 1 (Current)**: Human provides URL + region + brand explicitly
-2. **Phase 2**: Agent auto-detects region and brand from AEM page metadata/URL patterns
-3. **Phase 3**: Agent crawls AEM sitemaps to discover ingestible URLs automatically
-4. **Phase 4**: Agent monitors AEM for content changes and triggers re-ingestion proactively
+1. **Phase 1 (Current)**: Human provides URLs, region/brand auto-inferred
+2. **Phase 2**: Agent crawls AEM sitemaps to discover ingestible URLs automatically
+3. **Phase 3**: Agent monitors AEM for content changes and triggers re-ingestion proactively
 
 See [Future Roadmap](./roadmap.md) for details on the agentic evolution plan.

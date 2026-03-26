@@ -46,8 +46,19 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
 # Database fixture
 # ---------------------------------------------------------------------------
 @pytest.fixture()
+def mock_session_factory() -> MagicMock:
+    """Return a mock session_factory that produces AsyncSession-like mocks."""
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=mock_session)
+    factory._mock_session = mock_session  # expose for test assertions
+    return factory
+
+
+@pytest.fixture()
 def mock_db_pool() -> AsyncMock:
-    """Return an AsyncMock standing in for an asyncpg.Pool."""
+    """Return an AsyncMock standing in for an asyncpg.Pool (legacy, prefer mock_session_factory)."""
     pool = AsyncMock()
     pool.acquire = AsyncMock()
     pool.close = AsyncMock()
@@ -75,12 +86,12 @@ def s3_service(mock_s3_client: MagicMock) -> S3UploadService:
 # FastAPI test client
 # ---------------------------------------------------------------------------
 @pytest.fixture()
-def test_client(mock_db_pool: AsyncMock, mock_s3_client: MagicMock) -> TestClient:
+def test_client(mock_session_factory: MagicMock, mock_s3_client: MagicMock) -> TestClient:
     """Return a FastAPI TestClient with mocked dependencies on app.state."""
     app = FastAPI()
     app.include_router(api_router)
 
-    app.state.db_pool = mock_db_pool
+    app.state.session_factory = mock_session_factory
     app.state.s3_service = S3UploadService(
         s3_client=mock_s3_client, bucket_name="test-bucket"
     )

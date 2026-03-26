@@ -2,7 +2,7 @@
 
 ## System Summary
 
-The AEM KB Ingestion System is a FastAPI application that ingests content from Adobe Experience Manager (AEM) `model.json` endpoints, processes it through two AI agents (powered by AWS Strands SDK + Amazon Bedrock Claude Sonnet), and manages the resulting Markdown files through a quality-gated lifecycle into Amazon S3.
+The AEM KB Ingestion System is a FastAPI application that ingests content from Adobe Experience Manager (AEM) `model.json` endpoints, processes it through three AI agents (powered by AWS Strands SDK + Amazon Bedrock Claude Sonnet and Haiku), and manages the resulting Markdown files through a quality-gated lifecycle into Amazon S3.
 
 ## High-Level Architecture
 
@@ -36,17 +36,25 @@ The AEM KB Ingestion System is a FastAPI application that ingests content from A
                                           │    NeonDB        │  │  Amazon S3  │
                                           │  (PostgreSQL)    │  │  (Markdown) │
                                           │                  │  │             │
-                                          │  • kb_files      │  │  {DocType}/ │
+                                          │  • sources       │  │  {DocType}/ │
                                           │  • ingestion_jobs│  │  {Brand}/   │
-                                          │  • revalidation_ │  │  {Date}/    │
-                                          │    jobs           │  │  {file}.md  │
+                                          │  • kb_files      │  │  {Date}/    │
+                                          │  • revalidation_ │  │  {file}.md  │
+                                          │    jobs           │  │             │
+                                          │  • nav_tree_cache│  │             │
+                                          │  • deep_links    │  │             │
                                           └─────────────────┘  └─────────────┘
 ```
 
 ## Key Design Decisions
 
-### Two-Agent Architecture
-Extraction and validation are handled by separate Strands agents. This separation allows each agent to have a focused system prompt, independent tool sets, and the ability to evolve independently. The Extractor Agent handles content transformation (deterministic tools), while the Validator Agent handles quality assessment (LLM reasoning).
+### Three-Agent Architecture
+Content processing uses three specialized Strands agents:
+1. **Discovery Agent** (Claude Haiku) — fast, cheap content discovery and deep link detection from raw AEM JSON
+2. **Extractor Agent** (Claude Sonnet) — transforms discovered content into structured Markdown files
+3. **Validator Agent** (Claude Sonnet) — scores quality and classifies document type
+
+This separation allows each agent to have a focused system prompt, independent tool sets, and the ability to evolve independently. Haiku handles the high-volume discovery pass cheaply, while Sonnet handles the reasoning-heavy extraction and validation.
 
 ### Pre-Filtering Outside the LLM Context
 Large AEM JSON payloads are pre-filtered in Python before being passed to the Extractor Agent. The `filter_by_component_type` logic is deterministic and doesn't need LLM reasoning, so running it outside the agent's context window prevents `MaxTokensReachedException` for large pages.
@@ -66,7 +74,7 @@ A three-tier routing system balances automation with quality control:
 Thresholds are configurable via environment variables.
 
 ### Async-First Stack
-The entire stack is async: FastAPI, asyncpg (native async PostgreSQL driver), httpx for HTTP calls, and `asyncio.to_thread` for the synchronous boto3 S3 client. This ensures non-blocking I/O throughout.
+The entire stack is async: FastAPI, SQLAlchemy 2.0 async ORM (with asyncpg driver), httpx for HTTP calls, and `asyncio.to_thread` for the synchronous boto3 S3 client. This ensures non-blocking I/O throughout.
 
 ## Project Structure
 
@@ -82,36 +90,48 @@ aem-kb-system/
 │   │   ├── files.py               # File listing and detail endpoints
 │   │   ├── stats.py               # Aggregate statistics endpoint
 │   │   ├── revalidate.py          # Single and batch revalidation endpoints
-│   │   └── stream.py              # SSE streaming endpoint
+│   │   ├── stream.py              # SSE streaming endpoint
+│   │   ├── sources.py             # Source management endpoints
+│   │   ├── nav.py                 # Navigation tree parsing endpoint
+│   │   ├── query.py               # KB search and RAG chat endpoints
+│   │   └── context.py             # Context agent endpoint
 │   ├── agents/
-│   │   ├── extractor.py           # Extractor Agent (fetch + transform)
-│   │   └── validator.py           # Validator Agent (score + classify)
+│   │   ├── discovery.py           # Discovery Agent (Haiku — content + link discovery)
+│   │   ├── extractor.py           # Extractor Agent (Sonnet — transform to Markdown)
+│   │   ├── validator.py           # Validator Agent (Sonnet — score + classify)
+│   │   └── context_agent.py       # Context Agent (RAG chat)
 │   ├── tools/
 │   │   ├── fetch_aem.py           # HTTP fetch for AEM model.json
-│   │   ├── filter_components.py   # Recursive :items traversal + filtering
-│   │   ├── html_converter.py      # HTML → Markdown via markdownify
+│   │   ├── aem_pruner.py          # AEM JSON pruning for large payloads
 │   │   ├── md_generator.py        # Markdown file generation with frontmatter
 │   │   ├── duplicate_checker.py   # Content hash lookup (async)
-│   │   └── frontmatter_parser.py  # YAML frontmatter parsing + validation
+│   │   └── file_context.py        # File context retrieval for RAG
 │   ├── services/
 │   │   ├── pipeline.py            # Ingestion pipeline orchestration
 │   │   ├── revalidation.py        # Single/batch revalidation service
 │   │   ├── s3_upload.py           # S3 upload with structured keys
-│   │   └── stream_manager.py      # SSE event broadcasting + replay
+│   │   ├── stream_manager.py      # SSE event broadcasting + replay
+│   │   ├── kb_query.py            # KB search and RAG query service
+│   │   ├── nav_parser.py          # AEM navigation tree parser
+│   │   └── context_cache.py       # Context caching for RAG
 │   ├── db/
-│   │   ├── connection.py          # asyncpg pool management
-│   │   ├── queries.py             # All SQL query functions
-│   │   └── migrations/
-│   │       ├── 001_initial.sql    # kb_files + ingestion_jobs tables
-│   │       ├── 002_revalidation_jobs.sql
-│   │       └── 003_add_doc_type.sql
-│   └── models/
-│       └── schemas.py             # All Pydantic models
+│   │   ├── models.py              # SQLAlchemy ORM models (6 tables)
+│   │   ├── queries.py             # All async query functions
+│   │   └── session.py             # AsyncEngine + session factory
+│   ├── models/
+│   │   └── schemas.py             # All Pydantic models
+│   └── utils/
+│       └── url_inference.py       # Region/brand inference from URLs
+├── alembic/
+│   ├── env.py                     # Async migration environment
+│   └── versions/                  # Migration scripts (001 → 004)
 ├── tests/                         # pytest + hypothesis test suite
 ├── doc/                           # This documentation
 ├── check_infra.py                 # Infrastructure diagnostic script
 ├── reset_all.py                   # DB truncate + S3 empty script
 ├── pyproject.toml                 # Project metadata and dependencies
+├── docker-compose.yml             # Docker Compose with dev/preprod profiles
+├── Dockerfile                     # Container image definition
 └── .env                           # Environment configuration
 ```
 
@@ -121,9 +141,12 @@ aem-kb-system/
 |-------|-----------|---------|
 | Web Framework | FastAPI | Async REST API with automatic OpenAPI docs |
 | AI Agents | AWS Strands Agents SDK | Agent orchestration with tool calling |
-| LLM | Amazon Bedrock (Claude Sonnet) | Content extraction reasoning + quality validation |
+| LLM (Extraction/Validation) | Amazon Bedrock (Claude Sonnet) | Content extraction reasoning + quality validation |
+| LLM (Discovery) | Amazon Bedrock (Claude Haiku) | Fast content discovery + deep link detection |
 | Database | NeonDB (PostgreSQL) | Serverless PostgreSQL for file and job tracking |
-| DB Driver | asyncpg | Native async PostgreSQL driver |
+| ORM | SQLAlchemy 2.0 (async) | Declarative ORM with async session management |
+| Migrations | Alembic | Schema migration management |
+| DB Driver | asyncpg | Native async PostgreSQL driver (via SQLAlchemy) |
 | Object Storage | Amazon S3 | Approved Markdown file storage |
 | AWS SDK | boto3 | S3 operations |
 | HTTP Client | httpx | Async HTTP for AEM endpoint fetching |
@@ -137,30 +160,39 @@ aem-kb-system/
 ```
 main.py (app factory)
   ├── config.py (Settings)
-  ├── db/connection.py (asyncpg pool)
+  ├── db/session.py (AsyncEngine + session factory)
   ├── services/stream_manager.py (SSE)
-  ├── agents/extractor.py
-  │     ├── tools/filter_components.py
-  │     ├── tools/html_converter.py
+  ├── agents/discovery.py (Haiku discovery)
+  │     └── tools/aem_pruner.py
+  ├── agents/extractor.py (Sonnet extraction)
   │     └── tools/md_generator.py
-  ├── agents/validator.py
+  ├── agents/validator.py (Sonnet validation)
   │     ├── tools/duplicate_checker.py
   │     │     └── db/queries.py
-  │     └── tools/frontmatter_parser.py
+  │     └── tools/file_context.py
+  ├── agents/context_agent.py (RAG chat)
   ├── services/pipeline.py
+  │     ├── agents/discovery.py
   │     ├── agents/extractor.py
   │     ├── agents/validator.py
   │     ├── services/s3_upload.py
+  │     ├── services/stream_manager.py
   │     └── db/queries.py
   ├── services/revalidation.py
   │     ├── agents/validator.py
   │     ├── services/s3_upload.py
   │     └── db/queries.py
+  ├── services/kb_query.py
+  ├── services/context_cache.py
   └── api/router.py
         ├── api/ingest.py
         ├── api/queue.py
         ├── api/files.py
         ├── api/stats.py
         ├── api/revalidate.py
-        └── api/stream.py
+        ├── api/stream.py
+        ├── api/sources.py
+        ├── api/nav.py
+        ├── api/query.py
+        └── api/context.py
 ```
