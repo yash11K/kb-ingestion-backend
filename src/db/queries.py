@@ -22,7 +22,7 @@ from src.db.models import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-_ALLOWED_FILTERS = {"status", "region", "brand", "content_type", "component_type", "source_id"}
+_ALLOWED_FILTERS = {"status", "region", "brand", "content_type", "component_type", "source_id", "file_type"}
 
 
 def _model_to_dict(instance) -> dict:
@@ -50,6 +50,7 @@ async def insert_kb_file(session: AsyncSession, file: dict) -> UUID:
     """
     kb_file = KBFile(
         filename=file["filename"],
+        file_type=file.get("file_type", "markdown"),
         title=file["title"],
         content_type=file["content_type"],
         content_hash=file["content_hash"],
@@ -552,8 +553,13 @@ async def list_deep_links(
     session: AsyncSession,
     source_id: UUID,
     status: str = "pending",
+    found_in_page: str | None = None,
 ) -> list[dict]:
-    """Return deep links for a source filtered by status."""
+    """Return deep links for a source filtered by status.
+
+    If *found_in_page* is provided, only links discovered on that specific
+    page URL are returned (useful for per-file deep link previews).
+    """
     stmt = (
         select(
             DeepLink.id,
@@ -568,6 +574,8 @@ async def list_deep_links(
         .where(DeepLink.source_id == source_id, DeepLink.status == status)
         .order_by(DeepLink.created_at.desc())
     )
+    if found_in_page is not None:
+        stmt = stmt.where(DeepLink.found_in_page == found_in_page)
     result = await session.execute(stmt)
     rows = result.all()
     return [r._asdict() for r in rows]

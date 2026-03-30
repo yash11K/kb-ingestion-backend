@@ -50,9 +50,10 @@ async def _build_cache_key(
 
     deep_links: list[dict] = []
     source_id = record.get("source_id")
+    source_url = record.get("source_url")
     if source_id:
         for status in ("pending", "confirmed"):
-            deep_links.extend(await list_deep_links(session, source_id, status))
+            deep_links.extend(await list_deep_links(session, source_id, status, found_in_page=source_url))
 
     key = cache.make_key(
         file_id=str(file_id),

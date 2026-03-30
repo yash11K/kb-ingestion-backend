@@ -117,10 +117,15 @@ async def get_deep_links(
     source_id: UUID,
     request: Request,
     status: str = Query(default="pending", description="Filter by status"),
+    found_in_page: str | None = Query(default=None, description="Filter by the page URL where the link was discovered (file source_url)"),
 ) -> list[DeepLinkResponse]:
-    """Return deep links for a source, filtered by status."""
+    """Return deep links for a source, filtered by status.
+
+    Pass ``found_in_page`` (the file's source_url) to get only the deep
+    links discovered on that specific page — useful for file previews.
+    """
     async with request.app.state.session_factory() as session:
-        rows = await list_deep_links(session, source_id, status)
+        rows = await list_deep_links(session, source_id, status, found_in_page=found_in_page)
         await session.commit()
     return [DeepLinkResponse(**r) for r in rows]
 
