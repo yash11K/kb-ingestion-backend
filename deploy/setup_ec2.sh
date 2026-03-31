@@ -41,7 +41,7 @@ else
     echo ".env already exists, skipping..."
 fi
 
-echo ">>> Setting up systemd service..."
+echo ">>> Setting up systemd service (port 80)..."
 sudo tee /etc/systemd/system/kb-backend.service > /dev/null <<EOF
 [Unit]
 Description=AEM KB Ingestion Backend
@@ -55,6 +55,8 @@ EnvironmentFile=$APP_DIR/.env
 ExecStart=$APP_DIR/venv/bin/uvicorn src.main:create_app --factory --host 0.0.0.0 --port 80
 Restart=always
 RestartSec=5
+# Allow binding to port 80 without running as root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

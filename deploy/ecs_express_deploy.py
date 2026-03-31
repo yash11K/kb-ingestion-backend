@@ -14,7 +14,7 @@ response = client.create_express_gateway_service(
     scalingTarget={"minTaskCount": 1, "maxTaskCount": 1},
     primaryContainer={
         "image": "377693677956.dkr.ecr.us-east-1.amazonaws.com/aem-kb-system:deploy-20260331-0900",
-        "containerPort": 80,
+        "containerPort": 8000,
         "environment": [
             {"name": "DATABASE_URL", "value": "postgresql+asyncpg://neondb_owner:npg_qi7Ikv3EZPAX@ep-delicate-haze-ai7j6j3u-pooler.c-4.us-east-1.aws.neon.tech/neondb?ssl=require"},
             {"name": "AWS_REGION", "value": "us-east-1"},
