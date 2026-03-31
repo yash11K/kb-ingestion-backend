@@ -52,7 +52,7 @@ Type=simple
 User=ec2-user
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
-ExecStart=$APP_DIR/venv/bin/uvicorn src.main:create_app --factory --host 0.0.0.0 --port 8000
+ExecStart=$APP_DIR/venv/bin/uvicorn src.main:create_app --factory --host 0.0.0.0 --port 80
 Restart=always
 RestartSec=5
 
@@ -73,5 +73,5 @@ echo "  1. Edit the .env file:  nano $APP_DIR/.env"
 echo "  2. Start the service:   sudo systemctl start kb-backend"
 echo "  3. Check status:        sudo systemctl status kb-backend"
 echo "  4. View logs:           sudo journalctl -u kb-backend -f"
-echo "  5. App will be at:      http://54.160.238.80:8000"
+echo "  5. App will be at:      http://54.160.238.80"
 echo ""
