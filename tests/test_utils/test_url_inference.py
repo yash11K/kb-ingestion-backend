@@ -6,6 +6,7 @@ from src.utils.url_inference import (
     infer_brand,
     infer_namespace,
     infer_region,
+    is_pdf_link,
     normalize_for_matching,
     normalize_url,
 )
@@ -183,3 +184,51 @@ class TestNormalizeForMatching:
 
     def test_empty_path(self):
         assert normalize_for_matching("") == ""
+
+
+# ---------------------------------------------------------------------------
+# is_pdf_link
+# ---------------------------------------------------------------------------
+
+class TestIsPdfLink:
+    def test_simple_pdf_url(self):
+        assert is_pdf_link("https://example.com/docs/report.pdf") is True
+
+    def test_uppercase_extension(self):
+        assert is_pdf_link("https://example.com/docs/report.PDF") is True
+
+    def test_mixed_case_extension(self):
+        assert is_pdf_link("https://example.com/docs/report.Pdf") is True
+
+    def test_pdf_with_query_params(self):
+        assert is_pdf_link("https://example.com/docs/report.pdf?v=2&lang=en") is True
+
+    def test_pdf_with_fragment(self):
+        assert is_pdf_link("https://example.com/docs/report.pdf#page=3") is True
+
+    def test_pdf_with_query_and_fragment(self):
+        assert is_pdf_link("https://example.com/docs/report.PDF?v=1#section") is True
+
+    def test_pdf_with_trailing_slash(self):
+        assert is_pdf_link("https://example.com/docs/report.pdf/") is True
+
+    def test_html_extension(self):
+        assert is_pdf_link("https://example.com/page.html") is False
+
+    def test_no_extension(self):
+        assert is_pdf_link("https://example.com/page") is False
+
+    def test_empty_string(self):
+        assert is_pdf_link("") is False
+
+    def test_pdf_in_query_not_path(self):
+        assert is_pdf_link("https://example.com/view?file=report.pdf") is False
+
+    def test_docx_extension(self):
+        assert is_pdf_link("https://example.com/docs/report.docx") is False
+
+    def test_path_only(self):
+        assert is_pdf_link("/docs/report.pdf") is True
+
+    def test_root_path(self):
+        assert is_pdf_link("https://example.com/") is False

@@ -157,13 +157,16 @@ class KBFile(Base):
         server_default=text("uuid_generate_v4()"),
     )
     filename: Mapped[str] = mapped_column(Text, nullable=False)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    file_type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'markdown'")
+    )
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
-    component_type: Mapped[str] = mapped_column(Text, nullable=False)
+    component_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     aem_node_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    md_content: Mapped[str] = mapped_column(Text, nullable=False)
+    md_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     doc_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     modify_date: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -226,6 +229,7 @@ class KBFile(Base):
         Index("idx_kb_files_content_type", "content_type"),
         Index("idx_kb_files_doc_type", "doc_type"),
         Index("idx_kb_files_created_at", "created_at"),
+        Index("idx_kb_files_file_type", "file_type"),
         Index("idx_kb_files_source_id", "source_id"),
         Index("idx_kb_files_job_id", "job_id"),
         Index(

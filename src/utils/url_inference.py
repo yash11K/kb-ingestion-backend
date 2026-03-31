@@ -9,6 +9,28 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 
+def is_pdf_link(url: str) -> bool:
+    """Return True if the URL path ends with .pdf (case-insensitive).
+
+    Strips query parameters, fragments, and trailing slashes before checking.
+
+    Examples:
+        >>> is_pdf_link("https://example.com/docs/report.pdf")
+        True
+        >>> is_pdf_link("https://example.com/docs/report.PDF?v=2#page=3")
+        True
+        >>> is_pdf_link("https://example.com/docs/report.html")
+        False
+        >>> is_pdf_link("")
+        False
+    """
+    if not url:
+        return False
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    return path.lower().endswith(".pdf")
+
+
 def normalize_url(url: str) -> str:
     """Strip trailing slashes, query parameters, and fragments for cycle detection.
 
@@ -22,6 +44,28 @@ def normalize_url(url: str) -> str:
     # Rebuild with only scheme, netloc, and cleaned path
     clean_path = parsed.path.rstrip("/")
     return f"{parsed.scheme}://{parsed.netloc}{clean_path}" if parsed.scheme else clean_path
+
+def is_pdf_link(url: str) -> bool:
+    """Return True if the URL path ends with .pdf (case-insensitive).
+
+    Strips query parameters, fragments, and trailing slashes before checking.
+
+    Examples:
+        >>> is_pdf_link("https://example.com/docs/report.pdf")
+        True
+        >>> is_pdf_link("https://example.com/docs/report.PDF?v=2#page=3")
+        True
+        >>> is_pdf_link("https://example.com/docs/report.html")
+        False
+        >>> is_pdf_link("")
+        False
+    """
+    if not url:
+        return False
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    return path.lower().endswith(".pdf")
+
 
 
 def infer_brand(url: str) -> str:

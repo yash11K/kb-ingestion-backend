@@ -65,6 +65,7 @@ async def list_files(
             region=r["region"],
             brand=r["brand"],
             validation_score=r.get("validation_score"),
+            file_type=r.get("file_type", "markdown"),
             created_at=r["created_at"],
         )
         for r in rows
@@ -105,8 +106,9 @@ async def get_file(file_id: UUID, request: Request) -> FileDetail:
         component_type=record["component_type"],
         source_id=record.get("source_id"),
         aem_node_id=record["aem_node_id"],
-        md_content=record["md_content"],
+        md_content=record.get("md_content"),
         modify_date=record["modify_date"],
+        file_type=record.get("file_type", "markdown"),
         parent_context=record["parent_context"],
         region=record["region"],
         brand=record["brand"],

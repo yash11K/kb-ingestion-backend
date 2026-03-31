@@ -243,28 +243,30 @@ class QueueItemDetail(BaseModel):
 class FileSummary(BaseModel):
     id: UUID
     filename: str
-    title: str
-    content_type: str
+    title: str | None
+    content_type: str | None
     status: FileStatus
     source_id: UUID
     region: str
     brand: str
     validation_score: float | None
+    file_type: str = "markdown"
     created_at: datetime
 
 
 class FileDetail(BaseModel):
     id: UUID
     filename: str
-    title: str
-    content_type: str
+    title: str | None
+    content_type: str | None
     content_hash: str
     source_url: str
     component_type: str
     source_id: UUID | None = None
     aem_node_id: str | None = None
-    md_content: str
+    md_content: str | None = None
     modify_date: datetime | None = None
+    file_type: str = "markdown"
     parent_context: str
     region: str
     brand: str

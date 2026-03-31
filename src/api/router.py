@@ -12,6 +12,7 @@ from src.api.stream import router as stream_router
 from src.api.query import router as query_router
 from src.api.nav import router as nav_router
 from src.api.context import router as context_router
+from src.api.agent import router as agent_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(ingest_router)
@@ -24,3 +25,4 @@ api_router.include_router(stream_router)
 api_router.include_router(query_router)
 api_router.include_router(nav_router)
 api_router.include_router(context_router)
+api_router.include_router(agent_router)

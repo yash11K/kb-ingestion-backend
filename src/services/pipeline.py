@@ -9,9 +9,11 @@ Sonnet extraction → Haiku validation → route → upload.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -37,6 +39,7 @@ from src.utils.url_inference import (
     infer_brand,
     infer_namespace,
     infer_region,
+    is_pdf_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,28 +135,41 @@ class PipelineService:
             region = infer_region(url, self.settings.locale_region_map)
             namespace = infer_namespace(url, self.settings.namespace_list)
 
-            counters, deep_links_found = await self._process_single_url(
-                url, brand, region, namespace, job_id, source_id,
-            )
+            if is_pdf_link(url):
+                await self._process_pdf_link(
+                    url, brand, region, namespace, job_id, source_id,
+                )
+                pages_processed += 1
 
-            if counters.get("_failed"):
-                failed_count += 1
-                continue
+                sm.publish(job_id, "crawl_page_complete", {
+                    "url": url,
+                    "depth": 0,
+                    "files_extracted": 1,
+                    "deep_links_found": 0,
+                })
+            else:
+                counters, deep_links_found = await self._process_single_url(
+                    url, brand, region, namespace, job_id, source_id,
+                )
 
-            total_files_created += counters.get("files_created", 0)
-            total_files_auto_approved += counters.get("files_auto_approved", 0)
-            total_files_pending_review += counters.get("files_pending_review", 0)
-            total_files_auto_rejected += counters.get("files_auto_rejected", 0)
-            total_duplicates_skipped += counters.get("duplicates_skipped", 0)
-            total_deep_links += deep_links_found
-            pages_processed += 1
+                if counters.get("_failed"):
+                    failed_count += 1
+                    continue
 
-            sm.publish(job_id, "crawl_page_complete", {
-                "url": url,
-                "depth": 0,
-                "files_extracted": counters.get("files_created", 0),
-                "deep_links_found": deep_links_found,
-            })
+                total_files_created += counters.get("files_created", 0)
+                total_files_auto_approved += counters.get("files_auto_approved", 0)
+                total_files_pending_review += counters.get("files_pending_review", 0)
+                total_files_auto_rejected += counters.get("files_auto_rejected", 0)
+                total_duplicates_skipped += counters.get("duplicates_skipped", 0)
+                total_deep_links += deep_links_found
+                pages_processed += 1
+
+                sm.publish(job_id, "crawl_page_complete", {
+                    "url": url,
+                    "depth": 0,
+                    "files_extracted": counters.get("files_created", 0),
+                    "deep_links_found": deep_links_found,
+                })
 
         sm.publish(job_id, "crawl_summary", {
             "total_pages": pages_processed,
@@ -485,3 +501,120 @@ class PipelineService:
                 "S3 upload failed for file_id=%s; retaining approved status",
                 file_id, exc_info=True,
             )
+
+
+    async def _process_pdf_link(
+        self,
+        url: str,
+        brand: str,
+        region: str,
+        namespace: str,
+        job_id: UUID,
+        source_id: UUID | None,
+    ) -> None:
+        """Download a PDF deep link, upload to S3, and insert a kb_files record.
+
+        Steps:
+        1. Emit pdf_download SSE event
+        2. HTTP GET the PDF URL → raw bytes
+        3. Compute SHA-256 hash of bytes
+        4. Build filename: {hash[:8]}_{url_filename}.pdf
+        5. Insert kb_files record (file_type='pdf', status='approved',
+           md_content=None, validation_score=None)
+        6. Upload to S3 via upload_pdf
+        7. Update kb_files with S3 metadata
+        8. Emit pdf_upload_complete SSE event
+
+        On error: log, emit pdf_download_error SSE, return without raising.
+        """
+        sm = self.stream_manager
+        try:
+            # 1. Emit pdf_download SSE
+            sm.publish(job_id, "progress", {
+                "stage": "pdf_download",
+                "message": f"Downloading PDF from {url}",
+                "url": url,
+            })
+
+            # 2. HTTP GET the PDF
+            resp = httpx.get(url, timeout=self.settings.aem_request_timeout)
+            resp.raise_for_status()
+            pdf_bytes = resp.content
+
+            # 3. Compute SHA-256
+            content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+
+            # 4. Build filename: {hash[:8]}_{original_filename}.pdf
+            parsed_path = PurePosixPath(urlparse(url).path)
+            original_stem = parsed_path.stem or "document"
+            filename = f"{content_hash[:8]}_{original_stem}.pdf"
+
+            # 5. Insert kb_files record
+            file_dict = {
+                "filename": filename,
+                "file_type": "pdf",
+                "title": None,
+                "content_type": None,
+                "content_hash": content_hash,
+                "source_url": url,
+                "component_type": None,
+                "md_content": None,
+                "parent_context": None,
+                "region": region,
+                "brand": brand,
+                "key": None,
+                "namespace": namespace,
+                "validation_score": None,
+                "validation_breakdown": None,
+                "validation_issues": None,
+                "status": "approved",
+                "source_id": source_id,
+                "job_id": job_id,
+            }
+            async with self.session_factory() as session:
+                file_id = await insert_kb_file(session, file_dict)
+                await session.commit()
+
+            # 6. Upload to S3
+            result = await self.s3_service.upload_pdf(
+                pdf_bytes=pdf_bytes,
+                filename=filename,
+                brand=brand,
+                region=region,
+                namespace=namespace,
+                file_id=file_id,
+                content_hash=content_hash,
+            )
+
+            # 7. Update kb_files with S3 metadata
+            async with self.session_factory() as session:
+                await update_kb_file_status(
+                    session,
+                    file_id,
+                    status="approved",
+                    s3_bucket=result.s3_bucket,
+                    s3_key=result.s3_key,
+                    s3_uploaded_at=result.s3_uploaded_at,
+                )
+                await session.commit()
+
+            # 8. Emit pdf_upload_complete SSE
+            sm.publish(job_id, "progress", {
+                "stage": "pdf_upload_complete",
+                "message": f"PDF uploaded to S3: {filename}",
+                "filename": filename,
+                "s3_key": result.s3_key,
+            })
+
+        except Exception as exc:
+            logger.error(
+                "PDF processing failed for url=%s job_id=%s: %s",
+                url, job_id, exc, exc_info=True,
+            )
+            sm.publish(job_id, "progress", {
+                "stage": "pdf_download_error",
+                "message": f"Failed to process PDF: {exc}",
+                "url": url,
+                "error": str(exc),
+            })
+

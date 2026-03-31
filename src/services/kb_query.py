@@ -61,6 +61,24 @@ class KBQueryService:
         self._settings = settings
         self._use_bedrock_kb = bool(settings.bedrock_kb_id)
 
+    def _resolve_model_arn(self) -> str:
+        """Build the correct ARN for RetrieveAndGenerate.
+
+        Uses haiku_model_id for RAG queries (cheaper/faster).
+        Inference profile IDs (prefixed with ``us.`` or ``global.``) need
+        the ``inference-profile/`` ARN format with an account ID, while
+        plain foundation model IDs use ``foundation-model/``.
+        """
+        model_id = self._settings.haiku_model_id
+        region = self._settings.aws_region
+
+        if model_id.startswith(("us.", "eu.", "ap.", "global.")):
+            sts = boto3.client("sts", region_name=region)
+            account_id = sts.get_caller_identity()["Account"]
+            return f"arn:aws:bedrock:{region}:{account_id}:inference-profile/{model_id}"
+
+        return f"arn:aws:bedrock:{region}::foundation-model/{model_id}"
+
     # =====================================================================
     # search
     # =====================================================================
@@ -135,20 +153,20 @@ class KBQueryService:
     # =====================================================================
 
     async def _bedrock_kb_chat(self, query: str, limit: int) -> AsyncIterator[str]:
-        """Use Bedrock KB RetrieveAndGenerate API for RAG."""
+        """Stream RAG response from Bedrock KB using retrieve_and_generate_stream."""
         client = boto3.client(
             "bedrock-agent-runtime", region_name=self._settings.aws_region
         )
 
         try:
             response = await asyncio.to_thread(
-                client.retrieve_and_generate,
+                client.retrieve_and_generate_stream,
                 input={"text": query},
                 retrieveAndGenerateConfiguration={
                     "type": "KNOWLEDGE_BASE",
                     "knowledgeBaseConfiguration": {
                         "knowledgeBaseId": self._settings.bedrock_kb_id,
-                        "modelArn": f"arn:aws:bedrock:{self._settings.aws_region}::foundation-model/{self._settings.bedrock_model_id}",
+                        "modelArn": self._resolve_model_arn(),
                         "retrievalConfiguration": {
                             "vectorSearchConfiguration": {
                                 "numberOfResults": limit,
@@ -158,30 +176,48 @@ class KBQueryService:
                 },
             )
         except Exception as exc:
-            logger.exception("Bedrock KB RetrieveAndGenerate error")
+            logger.exception("Bedrock KB RetrieveAndGenerateStream error")
             yield _sse("error", {"message": str(exc)})
             return
 
-        # Emit sources
-        citations = response.get("citations", [])
-        sources = []
-        for citation in citations:
-            for ref in citation.get("retrievedReferences", []):
-                loc = ref.get("location", {})
-                s3_uri = loc.get("s3Location", {}).get("uri", "")
-                sources.append({
-                    "s3_uri": s3_uri,
-                    "content": ref.get("content", {}).get("text", "")[:200],
-                })
+        stream = response.get("stream")
+        if stream is None:
+            yield _sse("error", {"message": "No stream returned from Bedrock KB"})
+            return
 
-        yield _sse("sources", {"query": query, "sources": sources})
+        sources_emitted = False
+        try:
+            for event in stream:
+                # Citation events carry the retrieved source references
+                if "citation" in event:
+                    if not sources_emitted:
+                        sources = []
+                    citation = event["citation"]
+                    for ref in citation.get("retrievedReferences", []):
+                        loc = ref.get("location", {})
+                        s3_uri = loc.get("s3Location", {}).get("uri", "")
+                        sources.append({
+                            "s3_uri": s3_uri,
+                            "content": ref.get("content", {}).get("text", "")[:200],
+                        })
+                    if not sources_emitted:
+                        yield _sse("sources", {"query": query, "sources": sources})
+                        sources_emitted = True
 
-        # Emit generated output
-        output_text = response.get("output", {}).get("text", "")
-        if output_text:
-            yield _sse("token", {"text": output_text})
-        else:
-            yield _sse("token", {"text": "No response generated from the knowledge base."})
+                # Output events carry streamed text chunks
+                if "output" in event:
+                    text = event["output"].get("text", "")
+                    if text:
+                        yield _sse("token", {"text": text})
+
+        except Exception as exc:
+            logger.exception("Error reading Bedrock KB stream")
+            yield _sse("error", {"message": str(exc)})
+            return
+
+        # Emit sources even if no citation events came through
+        if not sources_emitted:
+            yield _sse("sources", {"query": query, "sources": []})
 
         yield _sse("done", {"query": query})
 

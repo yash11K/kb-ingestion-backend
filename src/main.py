@@ -22,6 +22,8 @@ from src.services.s3_upload import S3UploadService
 from src.services.kb_query import KBQueryService
 from src.services.stream_manager import StreamManager
 from src.tools.file_context import set_session_factory as set_context_session_factory
+from src.tools.kb_agent_tools import set_session_factory as set_kb_agent_session_factory
+from src.agents.kb_agent import KBAgent
 
 
 @asynccontextmanager
@@ -58,7 +60,9 @@ async def lifespan(app: FastAPI):
     revalidation_service = RevalidationService(validator, sf, s3_service, settings)
     kb_query_service = KBQueryService(sf, settings)
     set_context_session_factory(sf)
+    set_kb_agent_session_factory(sf)
     context_agent = ContextAgent(settings)
+    kb_agent = KBAgent(settings)
     context_cache = ContextCache()
 
     app.state.session_factory = sf
@@ -68,6 +72,7 @@ async def lifespan(app: FastAPI):
     app.state.revalidation_service = revalidation_service
     app.state.kb_query_service = kb_query_service
     app.state.context_agent = context_agent
+    app.state.kb_agent = kb_agent
     app.state.context_cache = context_cache
     app.state.settings = settings
 

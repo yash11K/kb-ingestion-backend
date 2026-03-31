@@ -133,3 +133,118 @@ async def test_uploaded_at_is_utc(service):
     result = await service.upload(file, file_id)
 
     assert result.s3_uploaded_at.tzinfo is not None
+
+
+# --- upload_pdf tests ---
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_returns_s3_upload_result(service):
+    pdf_bytes = b"%PDF-1.4 fake content"
+    file_id = uuid.uuid4()
+
+    result = await service.upload_pdf(
+        pdf_bytes=pdf_bytes,
+        filename="a1b2c3d4_report.pdf",
+        brand="TestBrand",
+        region="US",
+        namespace="docs",
+        file_id=file_id,
+        content_hash="sha256abc",
+    )
+
+    assert isinstance(result, S3UploadResult)
+    assert result.s3_bucket == "my-test-bucket"
+    assert result.s3_key == "TestBrand/US/docs/a1b2c3d4_report.pdf"
+    assert result.s3_uploaded_at is not None
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_calls_put_object_with_correct_params(service, s3_client):
+    pdf_bytes = b"%PDF-1.4 fake content"
+    file_id = uuid.uuid4()
+
+    await service.upload_pdf(
+        pdf_bytes=pdf_bytes,
+        filename="a1b2c3d4_report.pdf",
+        brand="TestBrand",
+        region="US",
+        namespace="docs",
+        file_id=file_id,
+        content_hash="sha256abc",
+    )
+
+    s3_client.put_object.assert_called_once_with(
+        Bucket="my-test-bucket",
+        Key="TestBrand/US/docs/a1b2c3d4_report.pdf",
+        Body=pdf_bytes,
+        ContentType="application/pdf",
+        Metadata={
+            "file_id": str(file_id),
+            "content_hash": "sha256abc",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_key_uses_brand_region_namespace(service):
+    file_id = uuid.uuid4()
+
+    result = await service.upload_pdf(
+        pdf_bytes=b"%PDF",
+        filename="deadbeef_policy.pdf",
+        brand="budget",
+        region="emea",
+        namespace="legal",
+        file_id=file_id,
+        content_hash="hash123",
+    )
+
+    assert result.s3_key == "budget/emea/legal/deadbeef_policy.pdf"
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_failure_logs_and_reraises(service, s3_client):
+    s3_client.put_object.side_effect = RuntimeError("S3 is down")
+
+    with pytest.raises(RuntimeError, match="S3 is down"):
+        await service.upload_pdf(
+            pdf_bytes=b"%PDF",
+            filename="abc_doc.pdf",
+            brand="b",
+            region="r",
+            namespace="n",
+            file_id=uuid.uuid4(),
+            content_hash="h",
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_sets_content_type_to_application_pdf(service, s3_client):
+    await service.upload_pdf(
+        pdf_bytes=b"%PDF",
+        filename="test.pdf",
+        brand="b",
+        region="r",
+        namespace="n",
+        file_id=uuid.uuid4(),
+        content_hash="h",
+    )
+
+    call_kwargs = s3_client.put_object.call_args
+    assert call_kwargs.kwargs["ContentType"] == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_upload_pdf_uploaded_at_is_utc(service):
+    result = await service.upload_pdf(
+        pdf_bytes=b"%PDF",
+        filename="test.pdf",
+        brand="b",
+        region="r",
+        namespace="n",
+        file_id=uuid.uuid4(),
+        content_hash="h",
+    )
+
+    assert result.s3_uploaded_at.tzinfo is not None
