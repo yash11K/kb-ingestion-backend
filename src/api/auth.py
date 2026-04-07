@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 # ── Hardcoded access code — change this to whatever you want ──
-ACCESS_CODE = "tariffs-are-transitory"
+ACCESS_CODE = "changeistheonlyconstant"
 
 # In-memory token store: token -> expiry timestamp
 _tokens: dict[str, float] = {}
