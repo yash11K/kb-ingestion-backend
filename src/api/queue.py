@@ -112,6 +112,7 @@ async def get_queue_item(file_id: UUID, request: Request) -> QueueItemDetail:
         validation_score=record["validation_score"],
         validation_breakdown=ValidationBreakdown(**record["validation_breakdown"]) if record["validation_breakdown"] else None,
         validation_issues=record["validation_issues"],
+        uniqueness_insight=record.get("uniqueness_insight"),
         created_at=record["created_at"],
         updated_at=record["updated_at"],
     )

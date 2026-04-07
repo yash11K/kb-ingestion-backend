@@ -185,6 +185,9 @@ class KBFile(Base):
     validation_issues: Mapped[Optional[dict]] = mapped_column(
         JSONB, nullable=True
     )
+    uniqueness_insight: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'pending_review'")
     )

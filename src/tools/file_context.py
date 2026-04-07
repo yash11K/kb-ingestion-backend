@@ -54,6 +54,7 @@ async def get_file_context(file_id: str) -> dict:
             "validation_score": record.get("validation_score"),
             "validation_breakdown": record.get("validation_breakdown"),
             "validation_issues": record.get("validation_issues"),
+            "uniqueness_insight": record.get("uniqueness_insight"),
             "md_content": record.get("md_content", ""),
             "parent_context": record.get("parent_context", ""),
             "aem_node_id": record.get("aem_node_id"),

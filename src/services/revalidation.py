@@ -75,13 +75,13 @@ class RevalidationService:
             brand=record["brand"],
         )
 
-    def _route_by_score(self, score: float, semantic_quality: float = 1.0) -> FileStatus:
+    def _route_by_score(self, score: float, semantic_quality: float = 10.0) -> FileStatus:
         """Determine file status based on validation score and semantic quality.
 
         Auto-approval requires both the total score threshold AND semantic
-        quality >= 90% of its max (0.45 out of 0.5).
+        quality >= 80% of its max (8.0 out of 10).
         """
-        min_semantic = 0.4  # 80% of 0.5 max
+        min_semantic = 8.0  # 80% of 10 max
         if score >= self.settings.auto_approve_threshold and semantic_quality >= min_semantic:
             return FileStatus.APPROVED
         elif score >= self.settings.auto_reject_threshold:
@@ -107,6 +107,7 @@ class RevalidationService:
                 validation_score=result.score,
                 validation_breakdown=result.breakdown.model_dump(),
                 validation_issues=result.issues,
+                uniqueness_insight=result.uniqueness_insight,
                 doc_type=result.doc_type,
             )
             await session.commit()
@@ -159,6 +160,68 @@ class RevalidationService:
             raise RuntimeError(f"Validation failed for file {file_id}") from exc
 
         await self._route_and_update(file_id, result)
+        async with self.session_factory() as session:
+            return await get_kb_file(session, file_id)
+
+    async def revalidate_uniqueness_single(self, file_id: UUID) -> dict:
+        """Run uniqueness-only assessment on a single file.
+
+        Updates the uniqueness score and insight in the existing validation
+        breakdown without re-running metadata or semantic quality checks.
+        Returns the updated file record.
+
+        Raises FileNotFoundError if file_id doesn't exist.
+        Raises RuntimeError if the uniqueness agent fails.
+        """
+        async with self.session_factory() as session:
+            record = await get_kb_file(session, file_id)
+        if record is None:
+            raise FileNotFoundError(f"File {file_id} not found")
+
+        md_file = self._reconstruct_markdown_file(record)
+
+        try:
+            uniqueness_result = await self.validator.assess_uniqueness(md_file)
+        except Exception as exc:
+            raise RuntimeError(f"Uniqueness assessment failed for file {file_id}") from exc
+
+        # Merge uniqueness into existing breakdown
+        existing_breakdown = record.get("validation_breakdown") or {}
+        new_uniqueness = uniqueness_result["uniqueness"]
+        existing_breakdown["uniqueness"] = new_uniqueness
+
+        metadata_completeness = existing_breakdown.get("metadata_completeness", 0.0)
+        semantic_quality = existing_breakdown.get("semantic_quality", 0.0)
+        new_total = round(metadata_completeness + semantic_quality + new_uniqueness, 2)
+
+        # Append uniqueness insight to issues
+        existing_issues = record.get("validation_issues") or []
+        insight = uniqueness_result.get("uniqueness_insight", "")
+
+        async with self.session_factory() as session:
+            await update_kb_file_status(
+                session,
+                file_id,
+                status=record["status"],  # preserve current status
+                validation_score=new_total,
+                validation_breakdown=existing_breakdown,
+                validation_issues=existing_issues,
+                uniqueness_insight=insight,
+            )
+            await session.commit()
+
+        # Re-route based on updated score
+        from src.models.schemas import ValidationBreakdown, ValidationResult
+        breakdown = ValidationBreakdown(**existing_breakdown)
+        result = ValidationResult(
+            score=new_total,
+            breakdown=breakdown,
+            issues=existing_issues,
+            uniqueness_insight=insight,
+            doc_type=record.get("doc_type", "General"),
+        )
+        await self._route_and_update(file_id, result)
+
         async with self.session_factory() as session:
             return await get_kb_file(session, file_id)
 
@@ -217,6 +280,68 @@ class RevalidationService:
         except Exception as exc:
             logger.error(
                 "Batch revalidation job %s failed: %s",
+                job_id, exc, exc_info=True,
+            )
+            async with self.session_factory() as session:
+                await update_revalidation_job(
+                    session, job_id,
+                    status="failed",
+                    error_message=str(exc),
+                    completed_at=datetime.now(timezone.utc),
+                )
+                await session.commit()
+
+    async def revalidate_uniqueness_batch(self, job_id: UUID, file_ids: list[UUID]) -> None:
+        """Background task: run uniqueness-only assessment on multiple files."""
+        try:
+            completed = 0
+            failed = 0
+            not_found = 0
+
+            for file_id in file_ids:
+                async with self.session_factory() as session:
+                    record = await get_kb_file(session, file_id)
+                if record is None:
+                    not_found += 1
+                    async with self.session_factory() as session:
+                        await update_revalidation_job(
+                            session, job_id, not_found=not_found,
+                        )
+                        await session.commit()
+                    continue
+
+                try:
+                    await self.revalidate_uniqueness_single(file_id)
+                    completed += 1
+                except Exception as exc:
+                    logger.error(
+                        "Batch uniqueness revalidation failed for file_id=%s: %s",
+                        file_id, exc, exc_info=True,
+                    )
+                    failed += 1
+
+                async with self.session_factory() as session:
+                    await update_revalidation_job(
+                        session, job_id,
+                        completed=completed,
+                        failed=failed,
+                        not_found=not_found,
+                    )
+                    await session.commit()
+
+            async with self.session_factory() as session:
+                await update_revalidation_job(
+                    session, job_id,
+                    status="completed",
+                    completed=completed,
+                    failed=failed,
+                    not_found=not_found,
+                    completed_at=datetime.now(timezone.utc),
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.error(
+                "Batch uniqueness revalidation job %s failed: %s",
                 job_id, exc, exc_info=True,
             )
             async with self.session_factory() as session:

@@ -17,12 +17,60 @@ import logging
 from typing import AsyncIterator
 
 import boto3
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import Settings
+from src.db.models import KBFile
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str] | None:
+    """Return (bucket, key) from an ``s3://bucket/key`` URI, or *None*."""
+    if not uri.startswith("s3://"):
+        return None
+    without_prefix = uri[5:]
+    slash = without_prefix.find("/")
+    if slash <= 0:
+        return None
+    return without_prefix[:slash], without_prefix[slash + 1:]
+
+
+def _strip_model_json(url: str) -> str:
+    """Remove the trailing ``.model.json`` so the URL points to the AEM page."""
+    if url.endswith(".model.json"):
+        return url.removesuffix(".model.json")
+    return url
+
+
+async def _enrich_sources_with_urls(
+    session_factory: async_sessionmaker[AsyncSession],
+    sources: list[dict],
+) -> None:
+    """Look up ``source_url`` for each source's S3 key and add it in-place."""
+    s3_keys: list[str] = []
+    for src in sources:
+        parsed = _parse_s3_uri(src.get("s3_uri", ""))
+        if parsed:
+            s3_keys.append(parsed[1])  # key
+
+    if not s3_keys:
+        return
+
+    async with session_factory() as session:
+        stmt = (
+            select(KBFile.s3_key, KBFile.source_url)
+            .where(KBFile.s3_key.in_(s3_keys))
+        )
+        rows = (await session.execute(stmt)).all()
+
+    key_to_url = {row.s3_key: row.source_url for row in rows}
+
+    for src in sources:
+        parsed = _parse_s3_uri(src.get("s3_uri", ""))
+        if parsed and parsed[1] in key_to_url:
+            src["source_url"] = _strip_model_json(key_to_url[parsed[1]])
 
 # ---------------------------------------------------------------------------
 # SQL (local fallback)
@@ -132,6 +180,7 @@ class KBQueryService:
         results = response.get("retrievalResults", [])
         yield _sse("search_start", {"query": query, "total": len(results)})
 
+        search_sources: list[dict] = []
         for result in results:
             content = result.get("content", {}).get("text", "")
             location = result.get("location", {})
@@ -139,12 +188,17 @@ class KBQueryService:
             score = result.get("score", 0.0)
             metadata = result.get("metadata", {})
 
-            yield _sse("result", {
+            search_sources.append({
                 "content": content,
                 "s3_uri": s3_uri,
                 "score": float(score),
                 "metadata": metadata,
             })
+
+        await _enrich_sources_with_urls(self._session_factory, search_sources)
+
+        for item in search_sources:
+            yield _sse("result", item)
 
         yield _sse("search_end", {"query": query, "total": len(results)})
 
@@ -201,6 +255,9 @@ class KBQueryService:
                             "content": ref.get("content", {}).get("text", "")[:200],
                         })
                     if not sources_emitted:
+                        await _enrich_sources_with_urls(
+                            self._session_factory, sources
+                        )
                         yield _sse("sources", {"query": query, "sources": sources})
                         sources_emitted = True
 

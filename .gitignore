@@ -29,3 +29,6 @@ Thumbs.db
 
 # Temp JSON data
 .somejson-to-be-ignored/
+
+# Deploy scripts (contain host/key info)
+update.sh

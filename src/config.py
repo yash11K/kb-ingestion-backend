@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     # AEM
     aem_request_timeout: int = 30  # seconds
 
-    # Validation thresholds
-    auto_approve_threshold: float = 0.7
-    auto_reject_threshold: float = 0.2
+    # Validation thresholds (0–30 scale: 10 metadata + 10 semantic + 10 uniqueness)
+    auto_approve_threshold: float = 21.0
+    auto_reject_threshold: float = 6.0
 
     # Component filtering (legacy — kept for backward compat with tests)
     allowlist: list[str] = []

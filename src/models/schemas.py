@@ -108,15 +108,16 @@ class ExtractionResult(BaseModel):
 
 
 class ValidationBreakdown(BaseModel):
-    metadata_completeness: float = Field(ge=0.0, le=0.3)
-    semantic_quality: float = Field(ge=0.0, le=0.5)
-    uniqueness: float = Field(ge=0.0, le=0.2)
+    metadata_completeness: float = Field(ge=0.0, le=10.0)
+    semantic_quality: float = Field(ge=0.0, le=10.0)
+    uniqueness: float = Field(ge=0.0, le=10.0)
 
 
 class ValidationResult(BaseModel):
-    score: float = Field(ge=0.0, le=1.0)
+    score: float = Field(ge=0.0, le=30.0)
     breakdown: ValidationBreakdown
     issues: list[str]
+    uniqueness_insight: str = ""         # Agent's reasoning about semantic uniqueness
     doc_type: str = "unknown"            # AI-classified document type (e.g. TnC, FAQ, ProductGuide)
 
 
@@ -161,6 +162,10 @@ class UpdateRequest(BaseModel):
 
 
 class RevalidateRequest(BaseModel):
+    file_ids: list[UUID] = Field(..., min_length=1)
+
+
+class RevalidateUniquenessRequest(BaseModel):
     file_ids: list[UUID] = Field(..., min_length=1)
 
 
@@ -236,6 +241,7 @@ class QueueItemDetail(BaseModel):
     validation_score: float | None
     validation_breakdown: ValidationBreakdown | None
     validation_issues: list[str] | None
+    uniqueness_insight: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -274,6 +280,7 @@ class FileDetail(BaseModel):
     validation_score: float | None
     validation_breakdown: ValidationBreakdown | None
     validation_issues: list[str] | None
+    uniqueness_insight: str | None = None
     status: FileStatus
     s3_bucket: str | None
     s3_key: str | None

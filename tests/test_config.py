@@ -37,8 +37,8 @@ class TestSettings:
         assert settings.aws_region == "us-east-1"
         assert settings.bedrock_model_id == "us.anthropic.claude-sonnet-4-20250514-v1:0"
         assert settings.aem_request_timeout == 30
-        assert settings.auto_approve_threshold == 0.7
-        assert settings.auto_reject_threshold == 0.2
+        assert settings.auto_approve_threshold == 21.0
+        assert settings.auto_reject_threshold == 6.0
         assert settings.haiku_max_input_tokens == 150_000
 
     def test_overrides_defaults_from_env(self, monkeypatch):
@@ -48,15 +48,15 @@ class TestSettings:
         monkeypatch.setenv("DENYLIST", '["*/container"]')
         monkeypatch.setenv("AWS_REGION", "eu-west-1")
         monkeypatch.setenv("AEM_REQUEST_TIMEOUT", "60")
-        monkeypatch.setenv("AUTO_APPROVE_THRESHOLD", "0.8")
-        monkeypatch.setenv("AUTO_REJECT_THRESHOLD", "0.3")
+        monkeypatch.setenv("AUTO_APPROVE_THRESHOLD", "25.0")
+        monkeypatch.setenv("AUTO_REJECT_THRESHOLD", "8.0")
 
         settings = Settings()
 
         assert settings.aws_region == "eu-west-1"
         assert settings.aem_request_timeout == 60
-        assert settings.auto_approve_threshold == 0.8
-        assert settings.auto_reject_threshold == 0.3
+        assert settings.auto_approve_threshold == 25.0
+        assert settings.auto_reject_threshold == 8.0
 
     def test_missing_database_url_raises(self, monkeypatch, tmp_path):
         """Settings raises ValidationError when database_url is missing."""

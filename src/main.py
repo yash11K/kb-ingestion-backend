@@ -23,6 +23,7 @@ from src.services.kb_query import KBQueryService
 from src.services.stream_manager import StreamManager
 from src.tools.file_context import set_session_factory as set_context_session_factory
 from src.tools.kb_agent_tools import set_session_factory as set_kb_agent_session_factory
+from src.tools.uniqueness_checker import set_settings as set_uniqueness_settings
 from src.agents.kb_agent import KBAgent
 
 
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     kb_query_service = KBQueryService(sf, settings)
     set_context_session_factory(sf)
     set_kb_agent_session_factory(sf)
+    set_uniqueness_settings(settings)
     context_agent = ContextAgent(settings)
     kb_agent = KBAgent(settings)
     context_cache = ContextCache()

@@ -1,8 +1,10 @@
 """Revalidation API endpoints.
 
-POST /files/{file_id}/revalidate – synchronous single-file revalidation.
-POST /revalidate                 – start a batch revalidation job (returns 202).
-GET  /revalidate/{job_id}        – retrieve batch job status.
+POST /files/{file_id}/revalidate            – synchronous single-file revalidation.
+POST /files/{file_id}/revalidate-uniqueness  – synchronous single-file uniqueness-only.
+POST /revalidate                             – start a batch revalidation job (returns 202).
+POST /revalidate-uniqueness                  – start a batch uniqueness-only job (returns 202).
+GET  /revalidate/{job_id}                    – retrieve batch job status.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from src.models.schemas import (
     JobStatus,
     RevalidateRequest,
     RevalidateResponse,
+    RevalidateUniquenessRequest,
     RevalidationJobResponse,
     ValidationBreakdown,
 )
@@ -25,19 +28,8 @@ from src.models.schemas import (
 router = APIRouter()
 
 
-@router.post("/files/{file_id}/revalidate")
-async def revalidate_single_file(file_id: UUID, request: Request) -> FileDetail:
-    """Re-run validation on a single KB file and return the updated detail."""
-    revalidation_service = request.app.state.revalidation_service
-
-    try:
-        record = await revalidation_service.revalidate_single(file_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-    except RuntimeError:
-        raise HTTPException(status_code=502, detail="Validation service unavailable")
-
-    # Build FileDetail from the updated record (same pattern as GET /files/{file_id})
+def _build_file_detail(record: dict) -> FileDetail:
+    """Build a FileDetail response from a DB record."""
     breakdown = None
     if record.get("validation_breakdown") is not None:
         breakdown = ValidationBreakdown(**record["validation_breakdown"])
@@ -61,6 +53,7 @@ async def revalidate_single_file(file_id: UUID, request: Request) -> FileDetail:
         validation_score=record.get("validation_score"),
         validation_breakdown=breakdown,
         validation_issues=record.get("validation_issues"),
+        uniqueness_insight=record.get("uniqueness_insight"),
         status=FileStatus(record["status"]),
         s3_bucket=record.get("s3_bucket"),
         s3_key=record.get("s3_key"),
@@ -71,6 +64,36 @@ async def revalidate_single_file(file_id: UUID, request: Request) -> FileDetail:
         created_at=record["created_at"],
         updated_at=record["updated_at"],
     )
+
+
+@router.post("/files/{file_id}/revalidate")
+async def revalidate_single_file(file_id: UUID, request: Request) -> FileDetail:
+    """Re-run full validation on a single KB file and return the updated detail."""
+    revalidation_service = request.app.state.revalidation_service
+
+    try:
+        record = await revalidation_service.revalidate_single(file_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except RuntimeError:
+        raise HTTPException(status_code=502, detail="Validation service unavailable")
+
+    return _build_file_detail(record)
+
+
+@router.post("/files/{file_id}/revalidate-uniqueness")
+async def revalidate_uniqueness_single(file_id: UUID, request: Request) -> FileDetail:
+    """Re-run uniqueness-only assessment on a single KB file."""
+    revalidation_service = request.app.state.revalidation_service
+
+    try:
+        record = await revalidation_service.revalidate_uniqueness_single(file_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except RuntimeError:
+        raise HTTPException(status_code=502, detail="Uniqueness assessment service unavailable")
+
+    return _build_file_detail(record)
 
 
 @router.post("/revalidate", status_code=202)
@@ -88,6 +111,26 @@ async def start_batch_revalidation(
 
     background_tasks.add_task(
         revalidation_service.revalidate_batch, job_id, body.file_ids
+    )
+
+    return RevalidateResponse(job_id=job_id, status=JobStatus.IN_PROGRESS)
+
+
+@router.post("/revalidate-uniqueness", status_code=202)
+async def start_batch_uniqueness_revalidation(
+    body: RevalidateUniquenessRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+) -> RevalidateResponse:
+    """Accept a batch uniqueness-only revalidation request and process in the background."""
+    revalidation_service = request.app.state.revalidation_service
+
+    async with request.app.state.session_factory() as session:
+        job_id = await insert_revalidation_job(session, len(body.file_ids))
+        await session.commit()
+
+    background_tasks.add_task(
+        revalidation_service.revalidate_uniqueness_batch, job_id, body.file_ids
     )
 
     return RevalidateResponse(job_id=job_id, status=JobStatus.IN_PROGRESS)

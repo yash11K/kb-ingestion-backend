@@ -392,6 +392,7 @@ class PipelineService:
                             validation_score=validation.score,
                             validation_breakdown=validation.breakdown.model_dump(),
                             validation_issues=validation.issues,
+                            uniqueness_insight=validation.uniqueness_insight,
                             doc_type=validation.doc_type,
                         )
                         await session.commit()
@@ -467,13 +468,13 @@ class PipelineService:
         }
         return await insert_kb_file(session, file_dict)
 
-    def _route_by_score(self, score: float, semantic_quality: float = 1.0) -> FileStatus:
+    def _route_by_score(self, score: float, semantic_quality: float = 10.0) -> FileStatus:
         """Determine file status based on validation score and semantic quality.
 
         Auto-approval requires both the total score threshold AND semantic
-        quality >= 90% of its max (0.45 out of 0.5).
+        quality >= 80% of its max (8.0 out of 10).
         """
-        min_semantic = 0.4  # 80% of 0.5 max
+        min_semantic = 8.0  # 80% of 10 max
         if score >= self.settings.auto_approve_threshold and semantic_quality >= min_semantic:
             return FileStatus.APPROVED
         elif score >= self.settings.auto_reject_threshold:

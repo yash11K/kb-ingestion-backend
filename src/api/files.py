@@ -116,6 +116,7 @@ async def get_file(file_id: UUID, request: Request) -> FileDetail:
         validation_score=record.get("validation_score"),
         validation_breakdown=breakdown,
         validation_issues=record.get("validation_issues"),
+        uniqueness_insight=record.get("uniqueness_insight"),
         status=FileStatus(record["status"]),
         s3_bucket=record.get("s3_bucket"),
         s3_key=record.get("s3_key"),

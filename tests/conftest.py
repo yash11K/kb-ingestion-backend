@@ -33,8 +33,8 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         "S3_BUCKET_NAME": "test-bucket",
         "BEDROCK_MODEL_ID": "us.anthropic.claude-sonnet-4-20250514-v1:0",
         "AEM_REQUEST_TIMEOUT": "30",
-        "AUTO_APPROVE_THRESHOLD": "0.7",
-        "AUTO_REJECT_THRESHOLD": "0.2",
+        "AUTO_APPROVE_THRESHOLD": "21.0",
+        "AUTO_REJECT_THRESHOLD": "6.0",
         "DENYLIST": '["*/responsivegrid","*/container","*/page"]',
     }
     for key, value in env_vars.items():

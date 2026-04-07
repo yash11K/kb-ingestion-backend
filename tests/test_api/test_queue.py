@@ -43,19 +43,21 @@ def _make_pending_review_record(**overrides) -> dict:
         "content_hash": "abc123hash",
         "source_url": "https://example.com/page.model.json",
         "component_type": "text",
+        "source_id": uuid.uuid4(),
         "aem_node_id": "/root/items/text_1",
         "md_content": "---\ntitle: Test\n---\nBody content",
         "modify_date": _NOW,
         "parent_context": "/root/items",
         "region": "US",
         "brand": "TestBrand",
-        "validation_score": 0.55,
+        "validation_score": 16.5,
         "validation_breakdown": {
-            "metadata_completeness": 0.25,
-            "semantic_quality": 0.2,
-            "uniqueness": 0.1,
+            "metadata_completeness": 7.5,
+            "semantic_quality": 6.0,
+            "uniqueness": 3.0,
         },
         "validation_issues": ["Minor formatting issue"],
+        "uniqueness_insight": "No similar documents found.",
         "status": "pending_review",
         "s3_bucket": None,
         "s3_key": None,
@@ -92,7 +94,7 @@ class TestListQueue:
         assert data["pages"] == 1
         assert len(data["items"]) == 1
         assert data["items"][0]["id"] == str(record["id"])
-        assert data["items"][0]["validation_score"] == 0.55
+        assert data["items"][0]["validation_score"] == 16.5
 
     def test_passes_filters_to_query(self):
         mock_list = AsyncMock(return_value=([], 0))
@@ -174,8 +176,8 @@ class TestGetQueueItem:
         data = response.json()
         assert data["id"] == str(record["id"])
         assert data["md_content"] == record["md_content"]
-        assert data["validation_score"] == 0.55
-        assert data["validation_breakdown"]["metadata_completeness"] == 0.25
+        assert data["validation_score"] == 16.5
+        assert data["validation_breakdown"]["metadata_completeness"] == 7.5
 
     def test_returns_404_when_not_found(self):
         file_id = uuid.uuid4()
