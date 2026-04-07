@@ -1,7 +1,8 @@
 """Top-level API router aggregation."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from src.api.auth import verify_token
 from src.api.files import router as files_router
 from src.api.ingest import router as ingest_router
 from src.api.queue import router as queue_router
@@ -13,8 +14,9 @@ from src.api.query import router as query_router
 from src.api.nav import router as nav_router
 from src.api.context import router as context_router
 from src.api.agent import router as agent_router
+from src.api.uniqueness import router as uniqueness_router
 
-api_router = APIRouter(prefix="/api/v1")
+api_router = APIRouter(prefix="/api/v1", dependencies=[Depends(verify_token)])
 api_router.include_router(ingest_router)
 api_router.include_router(sources_router)
 api_router.include_router(queue_router)
@@ -26,3 +28,4 @@ api_router.include_router(query_router)
 api_router.include_router(nav_router)
 api_router.include_router(context_router)
 api_router.include_router(agent_router)
+api_router.include_router(uniqueness_router)

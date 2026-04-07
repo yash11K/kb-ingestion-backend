@@ -11,6 +11,7 @@ from src.agents.context_agent import ContextAgent
 from src.agents.discovery import DiscoveryAgent
 from src.agents.extractor import ExtractorAgent
 from src.agents.validator import ValidatorAgent
+from src.api.auth import router as auth_router
 from src.api.router import api_router
 from src.config import get_settings
 from src.db.session import init_engine, create_session_factory
@@ -100,7 +101,8 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(api_router)
+    app.include_router(auth_router, prefix="/api/v1")  # public — no token needed
+    app.include_router(api_router)  # protected — token required
 
     @app.get("/health")
     async def health_check():
